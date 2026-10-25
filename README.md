@@ -40,6 +40,26 @@ Live traffic and weather APIs don't allow direct browser access, and the public 
 
 **Flightradar24:** FR24 only offers a paid API. Choose *Flightradar24 API* under *Options* on the start screen and paste your token. It's stored only in your browser's localStorage and is sent only through the game's own proxy (the dev server, or the Pages Function when deployed).
 
+### FlightAware (optional, more precise flight data)
+
+ADS-B gives exact positions but has to guess everything else. FlightAware's [AeroAPI](https://www.flightaware.com/aeroapi/) adds the airport's real schedule: confirmed routes, gates, terminals, scheduled/estimated/actual times, delays, cancellations and diversions. With it on:
+
+- **Live Watch:** flight details show departure and arrival times (in each airport's own time zone), gates, delay and route progress. The FIDS board shows the airport's real departures and arrivals.
+- **ATC Simulation:** upcoming real flights become the planned arrivals, and real departures are given to aircraft parked on the ramp, at their real times.
+
+AeroAPI is paid per query, so there are two ways to switch it on:
+
+- **Player key:** paste your own key under *Options → FlightAware AeroAPI key* on the start screen. It's stored only in your browser and forwarded as-is, never shared or cached. The game refreshes at most every 5 minutes.
+- **Site key (every player gets it):** store your key as a Cloudflare secret:
+
+  ```bash
+  npx wrangler pages secret put FLIGHTAWARE_API_KEY --project-name airport-ops-sim
+  ```
+
+  The site key can only fetch one page of an airport's schedule board, and each answer is cached at the edge for 10 minutes per airport. Cost therefore depends on how many airports are in use, at most about 6 queries per airport per hour, not on the number of players.
+
+For local testing put `FLIGHTAWARE_API_KEY=...` in `.env.local` (for `npm run dev`) or `.dev.vars` (for `npm run cf:dev`). Both are git-ignored. Without any key the game just carries on with ADS-B data.
+
 If OpenStreetMap can't be reached, the game generates a stand-in two-runway airport so it stays playable.
 
 ## License and attribution
@@ -48,6 +68,8 @@ The Airport Ops Simulator source code is licensed under the [MIT License](./LICE
 Third-party data and services are not covered by that license and remain subject to
 their own terms. OpenStreetMap data is © OpenStreetMap contributors and is available
 under the [Open Database License](https://www.openstreetmap.org/copyright).
+
+**Live Watch only shows the real world.** The simulation pauses while you're in Live Watch, and its radio calls, alerts and emergencies never appear there. Live Watch's log lists real events detected from ADS-B data: landings, departures, aircraft joining the approach and emergency squawks (7700/7600/7500). The **🎧 Real ATC audio** button opens the airport's real tower and ground feeds on LiveATC.net.
 
 ## How to play (ATC Simulation)
 
@@ -65,6 +87,7 @@ Scoring: +100 per arrival on blocks and per departure, +10 per completed service
 | Key | Action |
 |---|---|
 | `Tab` / `Enter` | next aircraft needing attention / do the requested action |
+| Double-click a strip | follow that flight with the camera |
 | `T` `O` `F` `R` | tower view (scroll = binoculars) / overview / follow / ramp view |
 | `Space`, `1`–`4` | pause, sim speed 1×/2×/4×/8× |
 | `N`, `L`, `Esc` | day/night, labels, deselect |

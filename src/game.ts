@@ -3,6 +3,8 @@ import type { AirportPreset } from './data/airports';
 import { DEFAULT_AIRLINES } from './data/airports';
 import { loadAirport, type AirportLayout } from './data/osm';
 import { FlightFeed, fetchMetar, type Metar, type Provider } from './data/flights';
+import { FlightAwareFeed } from './data/flightaware';
+import { airportWallClock, utcOffsetMinutes } from './data/time';
 import { airlineOf } from './data/airlines';
 import { FT, headingVec } from './geo/projection';
 import { LiveTraffic, type LiveTrack } from './live/liveTraffic';
@@ -14,6 +16,7 @@ import { TileGround, type MapStyle } from './world/ground';
 import { World } from './world/scene';
 import { TrafficView, VehicleView, MarshallerView, type AcRender } from './world/traffic';
 import { Hud } from './ui/hud';
+import type { LoadingScreen } from './ui/loading';
 
 export interface GameConfig {
   icao: string;
@@ -23,6 +26,8 @@ export interface GameConfig {
   mapStyle: MapStyle;
   provider: Provider;
   fr24Key: string;
+  /** Player's own FlightAware AeroAPI key (optional; the site may also have one). */
+  faKey: string;
   autoTower: boolean;
   autoGround: boolean;
   autoRamp: boolean;
@@ -40,6 +45,9 @@ export class Game {
   sim!: Simulation;
   live!: LiveTraffic;
   feed!: FlightFeed;
+  fa!: FlightAwareFeed;
+  /** Airport's UTC offset in minutes (real time zone when known, else a longitude guess). */
+  utcOffsetMin = 0;
   radio = new Radio();
   traffic = new TrafficView();
   vehicles = new VehicleView();
@@ -58,22 +66,27 @@ export class Game {
   private elapsed = 0;
   private liveTimer = 0;
   private liveBusy = false;
+  private faTimer = 0;
 
   constructor(public cfg: GameConfig, private viewport: HTMLElement, private hudRoot: HTMLElement) {
     this.mode = cfg.mode;
   }
 
-  async init(status: (s: string) => void) {
+  async init(progress: LoadingScreen) {
     const p = this.cfg.preset;
-    this.layout = await loadAirport({ icao: this.cfg.icao, fallbackCenter: p ? { lat: p.lat, lon: p.lon } : undefined, name: p?.name, iata: p?.iata }, status);
+    progress.stage('map', 'Checking local cache…');
+    this.layout = await loadAirport(
+      { icao: this.cfg.icao, fallbackCenter: p ? { lat: p.lat, lon: p.lon } : undefined, name: p?.name, iata: p?.iata, onBytes: (n) => progress.bytes(n) },
+      (s) => progress.detail(s),
+    );
     if (!this.layout.iata && p) this.layout.iata = p.iata;
-    status('Building taxiway network…');
+    progress.stage('network', `${this.layout.runways.length} runways, ${this.layout.lines.length} taxi lines`);
     await tick();
     this.graph = new TaxiGraph(this.layout);
     console.info(`Taxi graph: ${this.graph.nodes.size} nodes, ${this.graph.edges.length} edges, ${this.graph.stands.length} stands`);
     if (!this.graph.stands.length) throw new Error('No usable aircraft stands found for this airport in OpenStreetMap');
 
-    status('Building the 3D airport…');
+    progress.stage('scene', `${this.graph.stands.length} stands, ${this.layout.polys.length} buildings`);
     await tick();
     this.world = new World(this.viewport);
     this.ground = new TileGround(this.layout, this.cfg.mapStyle, this.world.renderer.capabilities.getMaxAnisotropy());
@@ -81,13 +94,15 @@ export class Game {
     this.world.scene.add(this.ground.group, this.airport.group, this.traffic.group, this.vehicles.group, this.marshallers.group);
     this.traffic.onPick = (id) => this.select(id);
 
-    // local time: rough timezone from longitude (good enough for day/night)
-    const offsetH = Math.round(this.layout.center.lon / 15);
-    const now = new Date();
-    this.startLocal = new Date(now.getTime() + now.getTimezoneOffset() * 60_000 + offsetH * 3_600_000);
+    // let the first view open on real imagery rather than grey ground (but don't wait forever)
+    progress.stage('imagery', this.ground.total ? `0 / ${this.ground.total} map tiles` : 'Plain map');
+    this.ground.onProgress = (done, total) => { progress.fraction(done / total); progress.detail(`${done} / ${total} map tiles`); };
+    await this.ground.ready(12_000);
+    this.ground.onProgress = () => {}; // late tiles keep loading quietly
 
-    status('Fetching weather (METAR)…');
+    progress.stage('weather', this.layout.icao);
     this.metar = await fetchMetar(this.layout.icao);
+    progress.detail(this.metar ? this.metar.raw.split(' ').slice(2, 4).join(' ') : 'Unavailable: using simulated wind');
 
     const airlines = this.cfg.preset?.airlines ?? DEFAULT_AIRLINES;
     this.sim = new Simulation(this.layout, this.graph, this.radio, {
@@ -102,12 +117,31 @@ export class Game {
     const wdir = this.metar?.wdir ?? Math.floor(Math.random() * 36) * 10;
     this.sim.setWind({ dir: wdir, speed: this.metar?.wspd ?? 8, variable: this.metar?.wdir == null });
 
-    this.live = new LiveTraffic(this.layout.proj, this.layout.elevation, this.layout.icao, this.layout.iata);
+    this.live = new LiveTraffic(this.layout.proj, this.layout.elevation, this.layout.icao, this.layout.iata, this.layout.runways);
+    // real-world events from ADS-B go to the live channel only
+    this.live.onEvent = (e) => {
+      this.radio.say(e.level === 'alert' ? 'ALERT' : 'LIVE', e.text, e.callsign, 'live');
+      if (e.level === 'alert' && this.mode === 'live') this.hud?.toast(`Real world · ${e.text}`, 'bad');
+    };
     this.feed = new FlightFeed(this.cfg.provider, this.cfg.fr24Key);
     this.radio.setSpeech(this.cfg.speech);
 
-    status('Connecting to live ADS-B traffic…');
+    progress.stage('traffic', 'Connecting to ADS-B receivers…');
     await this.pollLive(true);
+    progress.detail(this.live.tracks.size ? `${this.live.tracks.size} aircraft nearby` : 'Offline: generated flights only');
+
+    // FlightAware (if a key is available): real schedule, gates and times for this airport
+    this.fa = new FlightAwareFeed(this.layout.icao, this.cfg.faKey);
+    progress.detail('Checking FlightAware schedule…');
+    await this.fa.refresh();
+    this.faTimer = this.fa.interval;
+    this.applyFlightAware();
+    if (this.fa.board) progress.detail(`FlightAware: ${this.fa.board.flights.length} scheduled flights`);
+
+    // airport local time: real time zone from the preset or FlightAware, else from longitude
+    const tz = p?.tz ?? this.fa.board?.tz;
+    this.utcOffsetMin = (tz ? utcOffsetMinutes(tz) : null) ?? Math.round(this.layout.center.lon / 15) * 60;
+    this.startLocal = airportWallClock(this.utcOffsetMin);
     // seed the sim with real callsigns operating here right now
     const seeds = [...this.live.tracks.values()]
       .filter((t) => /^[A-Z]{3}\d/.test(t.f.callsign) && t.f.type)
@@ -117,8 +151,9 @@ export class Game {
     if (liveAirlines.length >= 4) this.sim.opts.airlines = liveAirlines;
 
     this.hud = new Hud(this, this.hudRoot);
-    this.sim.onAlert = (text, level) => this.hud.toast(text, level);
+    this.sim.onAlert = (text, level) => { if (this.mode === 'sim') this.hud.toast(text, level); };
     this.sim.start();
+    if (this.fa.board) this.sim.applySchedule(this.fa.board.flights, Date.now());
     this.setNight(this.isNightNow());
     this.cameraOverview();
     this.bindInput();
@@ -157,6 +192,7 @@ export class Game {
     this.vehicles.group.visible = mode === 'sim';
     this.marshallers.group.visible = mode === 'sim';
     this.traffic.clear();
+    this.radio.setActive(mode);
     this.hud.onModeChanged();
     if (mode === 'live') this.liveTimer = 0;
   }
@@ -170,12 +206,40 @@ export class Game {
       const radiusNm = this.mode === 'live' ? 60 : 30;
       const r = await this.feed.fetch(this.layout.center.lat, this.layout.center.lon, radiusNm);
       this.live.ingest(r.flights, r.source);
+      this.applyFlightAware();
     } catch (e) {
       this.live.error = (e as Error).message ?? 'unavailable';
       if (initial) this.radio.say('SYS', `Live traffic unavailable (${this.live.error}). Simulation uses generated flights.`);
     } finally {
       this.liveBusy = false;
     }
+  }
+
+  /**
+   * Attach FlightAware schedule entries to live ADS-B tracks by callsign. FlightAware's route,
+   * aircraft type and registration replace the guessed ones (adsbdb), and gates/times come along.
+   */
+  applyFlightAware() {
+    if (!this.fa?.board || !this.live) return;
+    for (const t of this.live.tracks.values()) {
+      const fa = this.fa.byCallsign(t.f.callsign);
+      t.fa = fa;
+      if (!fa) continue;
+      const f = t.f;
+      f.origin = fa.origin.iata ?? f.origin;
+      f.dest = fa.dest.iata ?? f.dest;
+      f.originIcao = fa.origin.icao ?? f.originIcao;
+      f.destIcao = fa.dest.icao ?? f.destIcao;
+      f.originName = fa.origin.city ?? f.originName;
+      f.destName = fa.dest.city ?? f.destName;
+      f.type = f.type || fa.aircraftType;
+      f.reg = f.reg || fa.registration;
+    }
+  }
+
+  /** Real wall-clock time at the airport (as a shifted Date, like startLocal). */
+  airportNow(): Date {
+    return airportWallClock(this.utcOffsetMin);
   }
 
   // ---------------- main loop ----------------
@@ -186,7 +250,8 @@ export class Game {
     const dt = Math.min(0.1, this.timer.getDelta());
     this.elapsed += dt;
 
-    if (!this.paused) {
+    // the simulation only runs while it's on screen: nothing from it may reach Live Watch
+    if (!this.paused && this.mode === 'sim') {
       const simDt = dt * this.timeScale;
       const steps = Math.ceil(simDt / 0.1);
       for (let i = 0; i < steps; i++) this.sim.update(simDt / steps);
@@ -199,6 +264,13 @@ export class Game {
       void this.pollLive();
     }
     this.live.update(dt);
+    if (this.fa?.enabled) {
+      this.faTimer -= dt;
+      if (this.faTimer <= 0) {
+        this.faTimer = this.fa.interval;
+        void this.fa.refresh().then(() => this.applyFlightAware());
+      }
+    }
 
     const states = this.mode === 'sim' ? this.simRenders() : this.liveRenders();
     this.traffic.sync(states, this.selectedId, this.elapsed, this.world.night);

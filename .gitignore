@@ -13,3 +13,6 @@ dist/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Cloudflare local secrets (wrangler)
+.dev.vars

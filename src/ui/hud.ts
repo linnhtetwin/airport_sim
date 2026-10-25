@@ -11,6 +11,8 @@ import { Radar } from './radar';
 import type { VehicleKind } from '../world/models';
 import { lsGet, lsSet } from '../data/cache';
 import { cityOf } from '../data/cities';
+import { fmtTime, type FaAirport, type FaFlight } from '../data/flightaware';
+import { consentChoice } from './consent';
 import { Clatter, FlipBoard, type FlipColumn, type FlipRow } from './flipboard';
 
 // split-flap board layout: time, flight, city, gate, remarks
@@ -51,7 +53,7 @@ export class Hud {
     this.bind();
     this.fillRunways();
     this.updateAttribution();
-    for (const m of g.radio.msgs) this.addRadio(m);
+    this.renderRadio();
     g.radio.onMessage((m) => this.addRadio(m));
     // restore minimised panels / clean view from the last session
     for (const p of lsGet('aos:minimized', '').split(',').filter(Boolean)) this.toggleMin(p, true);
@@ -96,7 +98,12 @@ export class Hud {
 </header>
 <aside class="panel strips" data-panel="strips"><div class="panel-head"><span class="head-main" data-el="stripHead"></span>${minBtn('strips')}</div><div class="strip-list" data-el="strips"></div></aside>
 <aside class="panel details" data-panel="details" data-el="details"><div class="panel-head"><span class="head-main" data-el="detailsHead">AIRCRAFT</span>${minBtn('details')}</div><div class="details-body" data-el="detailsBody"></div></aside>
-<section class="radio panel" data-panel="radio"><div class="panel-head"><span class="head-main">RADIO <span class="freqs"><i class="twr">TWR</i><i class="gnd">GND</i><i class="ramp">RAMP</i></span></span><button class="mini" data-act="speech" data-el="speechBtn">🔇 Voice off</button>${minBtn('radio')}</div><div class="radio-log" data-el="radio"></div></section>
+<section class="radio panel" data-panel="radio"><div class="panel-head">
+  <span class="head-main sim-only">RADIO <span class="freqs"><i class="twr">TWR</i><i class="gnd">GND</i><i class="ramp">RAMP</i></span><small class="chan">SIMULATION</small></span>
+  <span class="head-main live-only">LIVE EVENTS <small class="chan live">REAL · ADS-B DATA</small></span>
+  <button class="mini sim-only" data-act="speech" data-el="speechBtn">🔇 Voice off</button>
+  <a class="mini live-only" href="https://www.liveatc.net/search/?icao=${esc(L.icao.toLowerCase())}" target="_blank" rel="noopener noreferrer" title="Real tower and ground radio for this airport on LiveATC.net (opens a new tab)">🎧 Real ATC audio ↗</a>
+  ${minBtn('radio')}</div><div class="radio-log" data-el="radio"></div></section>
 <nav class="cams" data-el="cams">
   <button data-act="clean" class="clean-btn" title="Hide all panels for a clean map view (H)">⤢ Hide panels</button>
   <button data-cam="overview" title="O">Overview</button>
@@ -147,9 +154,19 @@ export class Hud {
       else if (cam === 'labels') g.showLabels = !g.showLabels;
       else if (cam === 'track') g.towerTrack = !g.towerTrack;
     });
+    // click selects; a second click on the same strip within 500 ms (the usual double-click time) follows it with the camera.
+    // (Counted by hand: selecting re-renders the strip, so the browser's dblclick may not fire.)
+    let lastClick = { id: '', t: 0 };
     this.el.strips.addEventListener('click', (e) => {
       const s = (e.target as HTMLElement).closest<HTMLElement>('[data-id]');
-      if (s) g.select(s.dataset.id!);
+      if (!s) return;
+      const id = s.dataset.id!;
+      const now = performance.now();
+      g.select(id);
+      if (lastClick.id === id && now - lastClick.t < 500) {
+        g.cameraFollow();
+        lastClick = { id: '', t: 0 };
+      } else lastClick = { id, t: now };
     });
     this.el.details.addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-cmd]');
@@ -162,8 +179,10 @@ export class Hud {
     this.el.radio.addEventListener('click', (e) => {
       const cs = (e.target as HTMLElement).closest<HTMLElement>('[data-cs]')?.dataset.cs;
       if (!cs) return;
-      const ac = g.mode === 'sim' ? g.sim.aircraft.find((a) => a.callsign === cs && a.phase !== 'GONE') : undefined;
-      if (ac) g.select(ac.id);
+      const id = g.mode === 'sim'
+        ? g.sim.aircraft.find((a) => a.callsign === cs && a.phase !== 'GONE')?.id
+        : [...g.live.tracks.values()].find((t) => t.f.callsign === cs)?.id;
+      if (id) g.select(id);
     });
     const rwyChange = () => {
       const ends = g.layout.runways.flatMap((r) => r.ends);
@@ -193,6 +212,9 @@ export class Hud {
     this.lastStrips = '';
     this.lastCmdKey = '';
     this.root.classList.toggle('live-mode', this.g.mode === 'live');
+    // each mode has its own log and alerts; nothing carries across
+    this.toastsEl.replaceChildren();
+    this.renderRadio();
     this.onSelect();
     this.refreshTopbar();
   }
@@ -224,7 +246,7 @@ export class Hud {
     if (this.acc < 0.25) return;
     this.acc = 0;
     const g = this.g;
-    const now = g.mode === 'sim' ? g.localTime() : new Date(Date.now() + new Date().getTimezoneOffset() * 60_000 + Math.round(g.layout.center.lon / 15) * 3_600_000);
+    const now = g.mode === 'sim' ? g.localTime() : g.airportNow();
     (this.el.clock as HTMLElement).textContent = `${hhmm(now)}:${String(now.getSeconds()).padStart(2, '0')}`;
     this.el.clockSub.textContent = g.mode === 'sim' ? (g.paused ? 'PAUSED' : `LOCAL · ${g.timeScale}×`) : 'LOCAL · REAL TIME';
     const st = g.sim.stats;
@@ -432,7 +454,8 @@ export class Hud {
 
   private liveDetails(t: LiveTrack) {
     const f = t.f;
-    const key = `live|${t.id}|${f.origin}|${f.dest}`;
+    const fa = t.fa;
+    const key = `live|${t.id}|${f.origin}|${f.dest}|${fa?.id}|${fa?.status}|${fa?.eOut}|${fa?.eIn}|${fa?.aOut}|${fa?.aIn}`;
     if (key !== this.lastCmdKey) {
       this.lastCmdKey = key;
       const code = LiveTraffic.airline(t);
@@ -446,8 +469,9 @@ export class Hud {
         <div class="d-route"><b>${esc(f.origin ?? '???')}</b><span>✈</span><b>${esc(f.dest ?? '???')}</b>${f.originName ? `<small>${esc(f.originName)} → ${esc(f.destName ?? '?')}</small>` : ''}<small>${esc(f.type ? `${f.type} (${spec.name})` : spec.name)}${f.reg ? ' · ' + esc(f.reg) : ''}</small></div>
         <div class="d-status"><span data-dyn="phase"></span></div>
         <div class="d-grid" data-dyn="grid"></div>
+        ${fa ? this.faBox(fa) : ''}
         <div class="row cam-row"><button data-cmd="follow">Follow camera</button><button data-cmd="tower">Watch from tower</button></div>
-        <p class="note">Real-time ADS-B position, smoothed between updates. Route data from the adsbdb.com callsign database (may be missing or out of date for some flights). Live mode is view-only — switch to ATC SIM to give instructions.</p>`;
+        <p class="note">Real-time ADS-B position, smoothed between updates. ${fa ? 'Route, gates and times from FlightAware.' : 'Route data from the adsbdb.com callsign database (may be missing or out of date for some flights).'} Live mode is view-only — switch to ATC SIM to give instructions.</p>`;
     }
     const phaseEl = this.el.details.querySelector('[data-dyn="phase"]');
     if (phaseEl) phaseEl.textContent = t.phase + (f.squawk === '7700' ? ' · EMERGENCY (7700)' : f.squawk === '7600' ? ' · RADIO FAILURE (7600)' : '');
@@ -470,11 +494,26 @@ export class Hud {
 
   // ---------------- radio ----------------
 
+  /** Rebuild the log for the channel on screen (sim radio or real-world events). */
+  private renderRadio() {
+    const channel = this.g.mode;
+    this.el.radio.replaceChildren();
+    const msgs = this.g.radio.msgs.filter((m) => m.channel === channel);
+    for (const m of msgs.slice(-150)) this.addRadio(m);
+    if (!msgs.length && channel === 'live') {
+      this.el.radio.innerHTML = `<p class="radio-empty">Real-world events appear here as they happen: landings, departures, aircraft joining the approach and emergency squawks, all from live ADS-B data. Simulation messages are never shown in Live Watch. For the real controllers' voices, use <b>🎧 Real ATC audio</b>.</p>`;
+    }
+    this.el.radio.scrollTop = this.el.radio.scrollHeight;
+  }
+
   private addRadio(m: RadioMsg) {
+    // stamp the time once, when the message arrives: sim clock or real airport time
+    m.clock ??= hhmm(m.channel === 'live' ? this.g.airportNow() : this.g.sim ? this.g.localTime() : new Date());
+    if (m.channel !== this.g.mode) return; // belongs to the other mode's log
+    this.el.radio.querySelector('.radio-empty')?.remove();
     const d = document.createElement('div');
     d.className = `msg ${m.who.toLowerCase()}`;
-    const t = this.g.sim ? this.g.localTime() : new Date();
-    d.innerHTML = `<time>${hhmm(t)}</time><b>${m.who === 'PILOT' ? '✈' : m.who}</b><span ${m.callsign ? `data-cs="${esc(m.callsign)}"` : ''}>${esc(m.text)}</span>`;
+    d.innerHTML = `<time>${m.clock}</time><b>${m.who === 'PILOT' ? '✈' : m.who}</b><span ${m.callsign ? `data-cs="${esc(m.callsign)}"` : ''}>${esc(m.text)}</span>`;
     const log = this.el.radio;
     const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
     log.appendChild(d);
@@ -519,7 +558,7 @@ export class Hud {
         </div>
         <div class="fids-head" data-el="fidsHead"></div>
         <div data-el="fidsMount"></div>
-        <p class="fids-note">${g.mode === 'sim' ? 'Simulated schedule for this airport.' : 'Live flights near the airport. Routes and times are estimates from ADS-B data.'}</p>
+        <p class="fids-note">${g.mode === 'sim' ? (g.fa?.board ? 'Simulated airport running today’s real schedule from FlightAware.' : 'Simulated schedule for this airport.') : g.fa?.board ? 'Real schedule, gates and times from FlightAware.' : 'Live flights near the airport. Routes and times are estimates from ADS-B data.'}</p>
       </div>`);
     const box = this.el.modalBox;
     box.classList.add('fids-modal');
@@ -576,7 +615,7 @@ export class Hud {
 
   private airportNow(): Date {
     const g = this.g;
-    return g.mode === 'sim' ? g.localTime() : new Date(Date.now() + new Date().getTimezoneOffset() * 60_000 + Math.round(g.layout.center.lon / 15) * 3_600_000);
+    return g.mode === 'sim' ? g.localTime() : g.airportNow();
   }
 
   /** Departure board rows: a few recent departures, then upcoming flights by scheduled time. */
@@ -584,6 +623,7 @@ export class Hud {
     const g = this.g;
     const now = this.airportNow();
     const at = (simT: number) => hhmm(new Date(now.getTime() + (simT - g.sim.time) * 1000));
+    if (g.mode === 'live' && g.fa?.board) return this.faRows('DEP');
     if (g.mode === 'live') {
       return g.live.list()
         .filter((t) => t.f.origin === g.layout.iata || t.f.originIcao === g.layout.icao)
@@ -621,6 +661,7 @@ export class Hud {
     const g = this.g;
     const now = this.airportNow();
     const at = (simT: number) => hhmm(new Date(now.getTime() + (simT - g.sim.time) * 1000));
+    if (g.mode === 'live' && g.fa?.board) return this.faRows('ARR');
     if (g.mode === 'live') {
       const inbound = g.live.list().filter((t) => t.f.dest === g.layout.iata || t.f.destIcao === g.layout.icao || t.phase === 'Approach');
       return inbound.map((t): FlipRow & { k: number } => {
@@ -661,6 +702,66 @@ export class Hud {
     return rows.sort((a, b) => a.k - b.k).slice(0, 12);
   }
 
+  /** Board rows from FlightAware's real schedule (live mode): recent flights, then upcoming. */
+  private faRows(kind: 'ARR' | 'DEP'): FlipRow[] {
+    const board = this.g.fa.board!;
+    const tz = board.tz;
+    const now = Date.now();
+    const MIN = 60_000;
+    const sched = (f: FaFlight) => (kind === 'DEP' ? f.sOut : f.sIn) ?? (kind === 'DEP' ? f.eOut : f.eIn) ?? 0;
+    const list = board.flights.filter((f) => f.kind === kind && sched(f) > 0);
+    const done = (f: FaFlight) => (kind === 'DEP' ? f.aOff : f.aIn ?? f.aOn);
+    const recent = list.filter((f) => done(f) && now - done(f)! < 30 * MIN).sort((a, b) => sched(a) - sched(b)).slice(-3);
+    const upcoming = list.filter((f) => !done(f) && sched(f) > now - 3 * 60 * MIN).sort((a, b) => sched(a) - sched(b));
+    return [...recent, ...upcoming].slice(0, 12).map((f): FlipRow => {
+      let remark: string, lamp: FlipRow['lamp'] = '';
+      const est = kind === 'DEP' ? f.eOut : f.eIn;
+      const late = est && sched(f) && est - sched(f) >= 15 * MIN;
+      if (f.cancelled) { remark = 'CANCELLED'; lamp = 'red'; }
+      else if (f.diverted) { remark = 'DIVERTED'; lamp = 'red'; }
+      else if (kind === 'DEP') {
+        const left = sched(f) - now;
+        if (f.aOff) remark = `DEPARTED ${fmtTime(f.aOff, tz)}`;
+        else if (f.aOut) { remark = 'TAXIING'; lamp = 'blue'; }
+        else if (late) { remark = `DELAYED ${fmtTime(est, tz)}`; lamp = 'amber'; }
+        else if (left <= 10 * MIN) { remark = 'FINAL CALL'; lamp = 'green'; }
+        else if (left <= 40 * MIN) { remark = 'BOARDING'; lamp = 'green'; }
+        else remark = left > 3 * 60 * MIN ? 'SCHEDULED' : 'ON TIME';
+      } else {
+        if (f.aIn) { remark = `ARRIVED ${fmtTime(f.aIn, tz)}`; lamp = 'green'; }
+        else if (f.aOn) { remark = `LANDED ${fmtTime(f.aOn, tz)}`; lamp = 'green'; }
+        else if (late) { remark = `DELAYED ${fmtTime(est, tz)}`; lamp = 'amber'; }
+        else if ((f.progress ?? 0) > 0) { remark = 'EN ROUTE'; lamp = 'blue'; }
+        else remark = sched(f) - now > 3 * 60 * MIN ? 'SCHEDULED' : 'ON TIME';
+      }
+      const other = kind === 'DEP' ? f.dest : f.origin;
+      const gate = kind === 'DEP' ? f.gateOrigin ?? (f.terminalOrigin ? `T${f.terminalOrigin}` : '') : f.gateDest ?? (f.terminalDest ? `T${f.terminalDest}` : '');
+      return { cells: [fmtTime(sched(f), tz), f.identIata ?? f.ident, other.city ?? cityOf(other.iata), gate, remark], lamp };
+    });
+  }
+
+  /** FlightAware block for the live details panel: status, times and gates at both ends. */
+  private faBox(fa: FaFlight): string {
+    const tzO = fa.origin.tz, tzD = fa.dest.tz;
+    const delay = (sec: number) => (sec >= 300 ? ` <em class="late">+${Math.round(sec / 60)} min</em>` : sec <= -300 ? ` <em>${Math.round(sec / 60)} min</em>` : '');
+    const end = (label: string, a: FaAirport, gate?: string, term?: string, s?: number | null, e?: number | null, act?: number | null, tz?: string, d = 0) => `
+      <div class="fa-end">
+        <small>${label} · ${esc(a.iata ?? a.icao ?? '?')}${a.city ? ' ' + esc(a.city) : ''}</small>
+        <div><span>Sched</span><b>${fmtTime(s, tz) || '—'}</b></div>
+        <div><span>${act ? 'Actual' : 'Est.'}</span><b>${fmtTime(act ?? e, tz) || '—'}</b>${delay(d)}</div>
+        <div><span>Gate</span><b>${esc([term ? `T${term.replace(/^T/i, '')}` : '', gate ?? ''].filter(Boolean).join(' ') || '—')}</b></div>
+      </div>`;
+    return `<div class="fa-box">
+      <h4>FlightAware <span class="${fa.cancelled ? 'late' : ''}">${esc(fa.cancelled ? 'Cancelled' : fa.diverted ? 'Diverted' : fa.status || '—')}</span></h4>
+      <div class="fa-ends">
+        ${end('Departure', fa.origin, fa.gateOrigin, fa.terminalOrigin, fa.sOut, fa.eOut, fa.aOut, tzO, fa.depDelay)}
+        ${end('Arrival', fa.dest, fa.gateDest, fa.terminalDest, fa.sIn, fa.eIn, fa.aIn, tzD, fa.arrDelay)}
+      </div>
+      ${fa.progress != null && fa.progress > 0 && fa.progress < 100 ? `<div class="fa-progress"><i style="--p:${fa.progress}%"></i><small>${fa.progress}% of the route flown</small></div>` : ''}
+      ${fa.identIata || fa.baggage ? `<small class="fa-meta">${fa.identIata ? 'Flight ' + esc(fa.identIata) : ''}${fa.baggage ? ' · Baggage belt ' + esc(fa.baggage) : ''}</small>` : ''}
+    </div>`;
+  }
+
   /** Stand nearest a live aircraft on the ground (for the gate column). */
   private gateNear(t: LiveTrack): string {
     if (t.alt > 15) return '';
@@ -685,11 +786,14 @@ export class Hud {
         <h4>Display</h4>
         <label>Map <select data-set="map"><option value="satellite">Satellite imagery</option><option value="osm">OpenStreetMap</option><option value="plain">Plain</option></select></label>
         <label><input type="checkbox" data-set="speech" ${g.radio.speech ? 'checked' : ''}> Read radio calls aloud (speech synthesis)</label>
+        <h4>Privacy</h4>
+        <p class="keys">Analytics cookies: <b>${consentChoice() === 'granted' ? 'allowed' : consentChoice() === 'denied' ? 'declined' : 'not chosen yet'}</b> · <a href="#" data-consent-open data-act="close">Change</a></p>
         <h4>Keyboard</h4>
         <p class="keys"><kbd>Tab</kbd> next aircraft needing attention · <kbd>Enter</kbd> do the requested action · <kbd>Esc</kbd> deselect<br>
         <kbd>T</kbd> tower view (scroll = binoculars) · <kbd>O</kbd> overview · <kbd>F</kbd> follow · <kbd>R</kbd> ramp view<br>
         <kbd>Space</kbd> pause · <kbd>1</kbd>–<kbd>4</kbd> sim speed 1×/2×/4×/8× · <kbd>N</kbd> day/night · <kbd>L</kbd> labels · <kbd>H</kbd> hide/show all panels<br>
-        Each panel's <b>–</b> button minimises it to its title bar; <b>+</b> restores it.</p>
+        Each panel's <b>–</b> button minimises it to its title bar; <b>+</b> restores it.<br>
+        Double-click a flight strip to follow that flight with the camera.</p>
       </div>`);
     const box = this.el.modalBox;
     (box.querySelector('[data-set="difficulty"]') as HTMLSelectElement).value = o.difficulty;

@@ -3,6 +3,7 @@ import type { AirportLayout, Runway, RunwayEnd } from '../data/osm';
 import { type TypeSpec, TYPES, SIM_TYPE_POOL, typeSpec } from '../data/aircraftTypes';
 import { telephony, airlineOf } from '../data/airlines';
 import type { VehicleKind } from '../world/models';
+import type { FaFlight } from '../data/flightaware';
 import { Path } from './path';
 import { Radio, type Speaker } from './radio';
 import { TaxiGraph, type GNode, type Stand } from './taxiGraph';
@@ -129,6 +130,8 @@ export class Simulation {
   onAlert: (text: string, level: 'warn' | 'bad' | 'good') => void = () => {};
   private arrTimer = 20;
   planned: { callsign: string; spec: TypeSpec; origin: string }[] = [];
+  /** Real scheduled arrivals waiting to join the plan (FlightAware). */
+  private realArrivals: { callsign: string; spec: TypeSpec; origin: string }[] = [];
   /** Completed flights for the information board. */
   history: { kind: 'ARR' | 'DEP'; callsign: string; place: string; stand: string; t: number; std: number }[] = [];
   private depTimer = 60;
@@ -269,6 +272,12 @@ export class Simulation {
   /** Keep a short queue of planned arrivals so the board can show them before they appear. */
   private fillPlan() {
     while (this.planned.length < 6) {
+      // real scheduled arrivals (FlightAware) first, in time order
+      const real = this.realArrivals.shift();
+      if (real) {
+        if (!this.aircraft.some((a) => a.callsign === real.callsign) && !this.planned.some((p) => p.callsign === real.callsign)) this.planned.push(real);
+        continue;
+      }
       const seed = this.seedFlights.find((f) => !this.aircraft.some((a) => a.callsign === f.callsign) && !this.planned.some((p) => p.callsign === f.callsign));
       if (seed && Math.random() < 0.7) {
         this.seedFlights.splice(this.seedFlights.indexOf(seed), 1);
@@ -277,6 +286,47 @@ export class Simulation {
         this.planned.push({ callsign: this.newCallsign(), spec: TYPES[weighted(SIM_TYPE_POOL)], origin: pick(DESTS.filter((d) => d !== this.opts.iata)) });
       }
     }
+  }
+
+  /**
+   * Use the airport's real schedule (FlightAware): upcoming arrivals become the planned
+   * arrival queue, and upcoming departures are given to aircraft parked on the ramp, with
+   * their real flight number, destination, scheduled time and (if that stand exists) gate.
+   */
+  applySchedule(flights: FaFlight[], nowMs: number) {
+    const callsign = (f: FaFlight) => (f.identIcao ?? f.ident).toUpperCase();
+    const usable = (f: FaFlight) => !f.cancelled && /^[A-Z]{3}\d/.test(callsign(f));
+    const elsewhere = (a: { iata?: string; icao?: string }) => a.iata ?? a.icao ?? pick(DESTS.filter((d) => d !== this.opts.iata));
+
+    const arrivals = flights
+      .filter((f) => f.kind === 'ARR' && usable(f) && !f.aOn && (f.eIn ?? f.sIn ?? 0) > nowMs)
+      .sort((a, b) => (a.eIn ?? a.sIn ?? 0) - (b.eIn ?? b.sIn ?? 0));
+    if (arrivals.length) {
+      this.realArrivals = arrivals.map((f) => ({ callsign: callsign(f), spec: typeSpec(f.aircraftType), origin: elsewhere(f.origin) }));
+      this.planned = [];
+      this.fillPlan();
+    }
+
+    const departures = flights
+      .filter((f) => f.kind === 'DEP' && usable(f) && !f.aOut && (f.eOut ?? f.sOut) != null && (f.eOut ?? f.sOut)! > nowMs)
+      .sort((a, b) => (a.sOut ?? 0) - (b.sOut ?? 0));
+    let dormant = this.aircraft.filter((a) => a.dormant && a.stand);
+    let applied = 0;
+    for (const f of departures) {
+      if (!dormant.length) break;
+      const cs = callsign(f);
+      if (this.aircraft.some((a) => a.callsign === cs)) continue;
+      const spec = typeSpec(f.aircraftType);
+      const atGate = f.gateOrigin ? dormant.find((a) => a.stand!.ref.toUpperCase() === f.gateOrigin!.toUpperCase()) : undefined;
+      const ac = atGate ?? dormant.find((a) => a.stand!.maxSpan + 2 >= spec.span) ?? dormant[0];
+      if (ac.stand!.maxSpan + 2 >= spec.span) ac.spec = spec;
+      ac.callsign = cs;
+      ac.dest = elsewhere(f.dest);
+      ac.std = this.time + ((f.eOut ?? f.sOut)! - nowMs) / 1000;
+      dormant = dormant.filter((a) => a !== ac);
+      applied++;
+    }
+    this.radio.say('SYS', `FlightAware schedule loaded: ${arrivals.length} arrivals and ${applied} departures are real flights.`);
   }
 
   /** Planned arrivals with an estimated touchdown time (sim seconds). */
@@ -356,9 +406,10 @@ export class Simulation {
     if (this.depTimer <= 0) {
       const dormant = this.aircraft.filter((a) => a.dormant);
       if (dormant.length) {
-        const ac = pick(dormant);
+        // the next scheduled departure goes first (real schedule order when FlightAware is on)
+        const ac = dormant.reduce((a, b) => (b.std < a.std ? b : a));
         ac.dormant = false;
-        ac.std = this.time + 420;
+        if (!(ac.std > this.time + 300 && ac.std < this.time + 3600)) ac.std = this.time + 420;
         this.beginTurnaround(ac, 2 + Math.floor(Math.random() * 3));
         this.say('RAMP', `${ac.callsign} at stand ${ac.stand?.ref} scheduled for departure to ${ac.dest}, turnaround services required`, ac, 'RAMP');
       }

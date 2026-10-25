@@ -21,6 +21,7 @@ export function configFromUrl(): GameConfig | null {
     mapStyle: (p.get('map') ?? saved('map', 'satellite')) as MapStyle,
     provider: saved('provider', 'adsb') as Provider,
     fr24Key: saved('fr24', ''),
+    faKey: saved('fa', ''),
     autoTower: saved('autoTower', '0') === '1',
     autoGround: saved('autoGround', '0') === '1',
     autoRamp: saved('autoRamp', '0') === '1',
@@ -54,6 +55,7 @@ export function showStartScreen(root: HTMLElement): Promise<GameConfig> {
           <label>Map <select data-el="map"><option value="satellite">Satellite imagery</option><option value="osm">OpenStreetMap</option><option value="plain">Plain</option></select></label>
           <label>Live data <select data-el="provider">${(Object.keys(PROVIDER_LABEL) as Provider[]).map((p) => `<option value="${p}">${PROVIDER_LABEL[p]}</option>`).join('')}</select></label>
           <label data-el="fr24row">Flightradar24 API key <input data-el="fr24" type="password" placeholder="paste your FR24 API token" autocomplete="off"></label>
+          <label title="Adds real schedules, gates, terminals and delays. AeroAPI bills per query; the game asks at most every 5 minutes.">FlightAware AeroAPI key (optional) <input data-el="fa" type="password" placeholder="your own key for exact schedules &amp; gates" autocomplete="off"></label>
           <label class="chk"><input type="checkbox" data-el="autoTower"> Auto Tower</label>
           <label class="chk"><input type="checkbox" data-el="autoGround"> Auto Ground</label>
           <label class="chk"><input type="checkbox" data-el="autoRamp"> Auto Ramp (marshal + services)</label>
@@ -61,7 +63,7 @@ export function showStartScreen(root: HTMLElement): Promise<GameConfig> {
         </div>
       </details>
       <button class="go" data-el="go">Open airport ▸</button>
-      <p class="fine">Airport data © OpenStreetMap contributors. Live positions from adsb.lol / OpenSky / Flightradar24. This is a game, not for real-world navigation.</p>
+      <p class="fine">Airport data © OpenStreetMap contributors. Live positions from adsb.lol / OpenSky / Flightradar24. This is a game, not for real-world navigation. · <a href="#" data-consent-open>Cookie settings</a></p>
     </div>
   </div>`;
 
@@ -73,6 +75,7 @@ export function showStartScreen(root: HTMLElement): Promise<GameConfig> {
   sel('map').value = saved('map', 'satellite');
   sel('provider').value = saved('provider', 'adsb');
   q<HTMLInputElement>('fr24').value = saved('fr24', '');
+  q<HTMLInputElement>('fa').value = saved('fa', '');
   for (const k of ['autoTower', 'autoGround', 'autoRamp', 'speech']) chk(k).checked = saved(k, '0') === '1';
 
   const refresh = () => {
@@ -100,13 +103,14 @@ export function showStartScreen(root: HTMLElement): Promise<GameConfig> {
         mapStyle: sel('map').value as MapStyle,
         provider: sel('provider').value as Provider,
         fr24Key: q<HTMLInputElement>('fr24').value.trim(),
+        faKey: q<HTMLInputElement>('fa').value.trim(),
         autoTower: chk('autoTower').checked,
         autoGround: chk('autoGround').checked,
         autoRamp: chk('autoRamp').checked,
         speech: chk('speech').checked,
       };
       lsSet('aos:icao', icao); lsSet('aos:mode', mode);
-      lsSet('aos:difficulty', cfg.difficulty); lsSet('aos:map', cfg.mapStyle); lsSet('aos:provider', cfg.provider); lsSet('aos:fr24', cfg.fr24Key);
+      lsSet('aos:difficulty', cfg.difficulty); lsSet('aos:map', cfg.mapStyle); lsSet('aos:provider', cfg.provider); lsSet('aos:fr24', cfg.fr24Key); lsSet('aos:fa', cfg.faKey);
       for (const k of ['autoTower', 'autoGround', 'autoRamp', 'speech'] as const) lsSet(`aos:${k}`, cfg[k] ? '1' : '0');
       resolve(cfg);
     });

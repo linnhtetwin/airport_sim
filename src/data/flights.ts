@@ -130,6 +130,7 @@ async function fetchFr24(lat: number, lon: number, nm: number, key: string): Pro
 export class FlightFeed {
   private routeCache = new Map<string, { o?: string; d?: string; oi?: string; di?: string; on?: string; dn?: string } | null>();
   private routeBusy = false;
+  private routeBackoffUntil = 0;
   lastError = '';
 
   constructor(public provider: Provider, public fr24Key = '') {}
@@ -163,7 +164,7 @@ export class FlightFeed {
 
   /** Origin/destination from adsbdb.com's callsign database (best effort, a few per poll). */
   private async lookupRoutes(flights: LiveFlight[]) {
-    if (this.routeBusy) return;
+    if (this.routeBusy || Date.now() < this.routeBackoffUntil) return;
     const todo = flights
       .filter((f) => /^[A-Z]{3}\d/.test(f.callsign) && !this.routeCache.has(f.callsign))
       .sort((a, b) => Number(a.onGround) - Number(b.onGround))
@@ -174,7 +175,7 @@ export class FlightFeed {
     type Apt = { iata_code?: string; icao_code?: string; name?: string; municipality?: string };
     const one = async (f: LiveFlight) => {
       try {
-        const j = await getJson<{ response?: { flightroute?: { origin?: Apt; destination?: Apt } } | string }>(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(f.callsign)}`, undefined, 10_000);
+        const j = await getJson<{ response?: { flightroute?: { origin?: Apt; destination?: Apt } } | string }>(`/api/adsbdb/v0/callsign/${encodeURIComponent(f.callsign)}`, undefined, 10_000);
         const r = typeof j.response === 'object' ? j.response.flightroute : undefined;
         if (r?.origin && r.destination) {
           this.routeCache.set(f.callsign, {
@@ -182,10 +183,22 @@ export class FlightFeed {
             on: r.origin.municipality ?? r.origin.name, dn: r.destination.municipality ?? r.destination.name,
           });
         }
-      } catch { /* unknown callsign or rate limited */ }
+      } catch (e) {
+        // rate limited / server trouble: forget this callsign so it's retried, and pause lookups
+        if (/HTTP (429|5\d\d)/.test(String((e as Error).message))) {
+          this.routeCache.delete(f.callsign);
+          this.routeBackoffUntil = Date.now() + 120_000;
+        }
+      }
     };
     try {
-      for (let i = 0; i < todo.length; i += 4) await Promise.all(todo.slice(i, i + 4).map(one));
+      for (let i = 0; i < todo.length; i += 4) {
+        if (Date.now() < this.routeBackoffUntil) {
+          for (const f of todo.slice(i)) this.routeCache.delete(f.callsign);
+          break;
+        }
+        await Promise.all(todo.slice(i, i + 4).map(one));
+      }
     } finally {
       this.routeBusy = false;
     }

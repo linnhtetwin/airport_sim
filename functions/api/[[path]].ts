@@ -22,6 +22,8 @@ interface Upstream {
   timeout?: number;
   /** Body check before caching: a "200 OK" that is really an error must not be cached. */
   cacheable?: (body: string) => boolean;
+  /** Treat upstream 404 as an ordinary, cacheable answer (passed on as 200). */
+  notFoundOk?: boolean;
 }
 
 const UPSTREAMS: Record<string, Upstream> = {
@@ -33,6 +35,9 @@ const UPSTREAMS: Record<string, Upstream> = {
   fr24: { origin: 'https://fr24api.flightradar24.com', paths: /^\/api\/live\/flight-positions\/(full|light)$/, ttl: 0, forward: ['authorization', 'accept-version'] },
   // aviationweather.gov METAR
   awc: { origin: 'https://aviationweather.gov', paths: /^\/api\/data\/metar$/, ttl: 300 },
+  // adsbdb.com flight routes by callsign. "Unknown callsign" is a 404 there; it's answered as
+  // a normal (cached) reply so browsers don't log an error for every unknown flight.
+  adsbdb: { origin: 'https://api.adsbdb.com', paths: /^\/v0\/callsign\/[A-Za-z0-9]{2,10}$/, ttl: 21_600, notFoundOk: true },
   // OpenStreetMap Overpass (airport layouts). Public servers reject some browser origins, and
   // layouts rarely change, so good answers are cached for a day for every player.
   overpass: {
@@ -54,6 +59,7 @@ interface Context {
   request: Request;
   params: { path?: string | string[] };
   waitUntil(p: Promise<unknown>): void;
+  env: { FLIGHTAWARE_API_KEY?: string };
 }
 declare const caches: { default: Cache };
 
@@ -63,11 +69,47 @@ const fail = (status: number, message: string) =>
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
   });
 
-export const onRequest = async ({ request, params, waitUntil }: Context): Promise<Response> => {
+// FlightAware AeroAPI (paid, billed per query). Only one endpoint is allowed: an airport's
+// schedule board (recent + upcoming arrivals and departures), one page per call.
+//  - A player's own key (x-apikey header) is forwarded as-is and never shared.
+//  - Otherwise the site key (Cloudflare secret FLIGHTAWARE_API_KEY) is used, and the answer is
+//    cached at the edge for 10 minutes per airport, so cost depends on airports in use, not players.
+const FA_TTL = 600;
+
+async function flightAware(request: Request, path: string, env: Context['env']): Promise<Response> {
+  if (!/^\/aeroapi\/airports\/[A-Z0-9]{3,4}\/flights$/.test(path)) return fail(400, 'Request not allowed');
+  const own = request.headers.get('x-apikey');
+  const key = own || env.FLIGHTAWARE_API_KEY;
+  if (!key) return fail(503, 'FlightAware is not configured');
+  const shared = !own;
+  let res: Response;
+  try {
+    // fixed query (one page of airline flights) keeps every call at the minimum cost
+    res = await fetch(`https://aeroapi.flightaware.com${path}?type=Airline&max_pages=1`, {
+      headers: { 'x-apikey': key, Accept: 'application/json', 'User-Agent': USER_AGENT },
+      signal: AbortSignal.timeout(20_000),
+      cf: shared ? { cacheTtlByStatus: { '200-299': FA_TTL, '300-599': 0 }, cacheEverything: true } : { cacheTtl: 0 },
+    } as RequestInit);
+  } catch (e) {
+    return fail(502, `FlightAware unavailable: ${(e as Error).message}`);
+  }
+  return new Response(res.body, {
+    status: res.status,
+    headers: {
+      'Content-Type': res.headers.get('Content-Type') ?? 'application/json',
+      'Cache-Control': shared && res.ok ? `public, max-age=${FA_TTL}` : 'no-store',
+      'X-Upstream': 'flightaware',
+      'X-FlightAware-Key': own ? 'player' : 'site',
+    },
+  });
+}
+
+export const onRequest = async ({ request, params, waitUntil, env }: Context): Promise<Response> => {
   if (request.method !== 'GET' && request.method !== 'HEAD') return fail(405, 'Method not allowed');
 
   const segments = Array.isArray(params.path) ? params.path : params.path ? [params.path] : [];
   const [service, ...rest] = segments;
+  if (service === 'flightaware') return flightAware(request, '/' + rest.join('/'), env ?? {});
   const up = service ? UPSTREAMS[service] : undefined;
   if (!up) return fail(404, 'Unknown API');
 
@@ -104,10 +146,10 @@ export const onRequest = async ({ request, params, waitUntil }: Context): Promis
         signal: AbortSignal.timeout(slice),
         // shared edge cache for the upstream response; error statuses aren't cached
         cf: up.ttl > 0 && !up.cacheable
-          ? { cacheTtlByStatus: { '200-299': up.ttl, '300-599': 0 }, cacheEverything: true }
+          ? { cacheTtlByStatus: up.notFoundOk ? { '200-299': up.ttl, '404': up.ttl, '500-599': 0 } : { '200-299': up.ttl, '300-599': 0 }, cacheEverything: true }
           : { cacheTtl: 0 },
       } as RequestInit);
-      if (res.ok || origins.length === 1) break;
+      if (res.ok || origins.length === 1 || (up.notFoundOk && res.status === 404)) break;
       lastError = `${new URL(origin).host}: HTTP ${res.status}`;
     } catch (e) {
       lastError = `${new URL(origin).host}: ${(e as Error).message}`;
@@ -128,9 +170,10 @@ export const onRequest = async ({ request, params, waitUntil }: Context): Promis
     return out;
   }
 
-  const out = new Response(res.body, { status: res.status });
+  const ok = res.ok || (up.notFoundOk && res.status === 404);
+  const out = new Response(res.body, { status: ok ? 200 : res.status });
   out.headers.set('Content-Type', contentType);
-  out.headers.set('Cache-Control', up.ttl > 0 && res.ok ? `public, max-age=${up.ttl}` : 'no-store');
+  out.headers.set('Cache-Control', up.ttl > 0 && ok ? `public, max-age=${up.ttl}` : 'no-store');
   out.headers.set('X-Upstream', service);
   return out;
 };

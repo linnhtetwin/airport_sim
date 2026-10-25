@@ -93,7 +93,26 @@ const MIRRORS = [
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
 
-async function overpass(query: string, onStatus: (s: string) => void, timeoutMs = 90_000): Promise<OsmElement[]> {
+/** Read a response body, reporting bytes as they arrive (for the loading screen). */
+async function readText(res: Response, onBytes?: (n: number) => void): Promise<string> {
+  if (!res.body || !onBytes) return res.text();
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    n += value.length;
+    onBytes(n);
+  }
+  const all = new Uint8Array(n);
+  let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  return new TextDecoder().decode(all);
+}
+
+async function overpass(query: string, onStatus: (s: string) => void, timeoutMs = 90_000, onBytes?: (n: number) => void): Promise<OsmElement[]> {
   let lastErr: unknown = null;
   // First our own proxy (dev server or Pages Function: shared edge cache, no CORS/origin
   // problems), then the public servers directly as a fallback.
@@ -104,13 +123,13 @@ async function overpass(query: string, onStatus: (s: string) => void, timeoutMs 
   ];
   for (const { host, url, init, wait } of attempts) {
     try {
-      onStatus(`Querying ${host === 'OpenStreetMap' ? 'OpenStreetMap' : `OpenStreetMap (${host})`}…`);
+      onStatus(host === 'OpenStreetMap' ? 'Waiting for OpenStreetMap to prepare the map data…' : `Trying another OpenStreetMap server (${host})…`);
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), wait);
       const res = await fetch(url, { ...init, signal: ctl.signal });
       clearTimeout(timer);
       if (!res.ok) throw new Error(`${host}: HTTP ${res.status}`);
-      const json = (await res.json()) as { elements: OsmElement[]; remark?: string };
+      const json = JSON.parse(await readText(res, onBytes)) as { elements: OsmElement[]; remark?: string };
       if (json.remark && /runtime error|timed out/i.test(json.remark)) throw new Error(json.remark);
       return json.elements;
     } catch (e) {
@@ -124,7 +143,7 @@ async function overpass(query: string, onStatus: (s: string) => void, timeoutMs 
 const AEROWAY_WAYS = 'runway|taxiway|taxilane|apron|terminal|hangar|parking_position|stopway|jet_bridge|helipad|holding_position|tower|control_tower|gate';
 const AEROWAY_NODES = 'parking_position|gate|holding_position|tower|control_tower';
 
-export interface LoadOptions { icao: string; fallbackCenter?: LatLon; name?: string; iata?: string }
+export interface LoadOptions { icao: string; fallbackCenter?: LatLon; name?: string; iata?: string; onBytes?: (n: number) => void }
 
 export async function loadAirport(opts: LoadOptions, onStatus: (s: string) => void): Promise<AirportLayout> {
   const icao = opts.icao.toUpperCase();
@@ -161,6 +180,7 @@ export async function loadAirport(opts: LoadOptions, onStatus: (s: string) => vo
           `node["man_made"="tower"]["tower:type"="observation"];);out geom;`,
         onStatus,
         170_000,
+        opts.onBytes,
       );
       elements = aerodrome ? [aerodrome, ...body] : body;
       // strip noisy navigation-aid lights etc. before caching

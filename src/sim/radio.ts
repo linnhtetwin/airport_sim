@@ -1,13 +1,29 @@
 import { spokenText } from '../data/airlines';
 
-export type Speaker = 'TWR' | 'GND' | 'RAMP' | 'PILOT' | 'SYS' | 'ALERT';
+export type Speaker = 'TWR' | 'GND' | 'RAMP' | 'PILOT' | 'SYS' | 'ALERT' | 'LIVE';
 
-export interface RadioMsg { t: number; who: Speaker; text: string; callsign?: string }
+/**
+ * Which world a message belongs to. Simulation radio calls and real-world events are kept
+ * apart so nothing from the game ever appears in Live Watch (and vice versa).
+ */
+export type Channel = 'sim' | 'live';
+
+export interface RadioMsg {
+  t: number;
+  who: Speaker;
+  text: string;
+  callsign?: string;
+  channel: Channel;
+  /** Clock time shown in the log, stamped when the message first arrives on screen. */
+  clock?: string;
+}
 
 /** Radio transcript with optional text-to-speech (controller and pilot voices). */
 export class Radio {
   msgs: RadioMsg[] = [];
   speech = false;
+  /** Channel currently on screen; only the simulation's own calls are ever spoken. */
+  active: Channel = 'sim';
   private listeners: ((m: RadioMsg) => void)[] = [];
   private voices: SpeechSynthesisVoice[] = [];
   private queue: RadioMsg[] = [];
@@ -22,16 +38,23 @@ export class Radio {
 
   onMessage(fn: (m: RadioMsg) => void) { this.listeners.push(fn); }
 
-  say(who: Speaker, text: string, callsign?: string) {
-    const m: RadioMsg = { t: Date.now(), who, text, callsign };
+  say(who: Speaker, text: string, callsign?: string, channel: Channel = 'sim') {
+    const m: RadioMsg = { t: Date.now(), who, text, callsign, channel };
     this.msgs.push(m);
-    if (this.msgs.length > 300) this.msgs.shift();
+    // keep a bounded history per channel
+    if (this.msgs.filter((x) => x.channel === channel).length > 300) this.msgs.splice(this.msgs.findIndex((x) => x.channel === channel), 1);
     for (const l of this.listeners) l(m);
-    if (this.speech && who !== 'SYS' && 'speechSynthesis' in window) {
+    if (this.speech && channel === 'sim' && this.active === 'sim' && who !== 'SYS' && 'speechSynthesis' in window) {
       this.queue.push(m);
       if (this.queue.length > 4) this.queue.splice(0, this.queue.length - 4); // don't fall too far behind
       if (!speechSynthesis.speaking) this.speakNext();
     }
+  }
+
+  /** Switch the channel on screen; anything still queued for speech is dropped. */
+  setActive(channel: Channel) {
+    this.active = channel;
+    if ('speechSynthesis' in window) { speechSynthesis.cancel(); this.queue = []; }
   }
 
   private speakNext() {

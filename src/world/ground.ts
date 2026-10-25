@@ -34,6 +34,11 @@ export class TileGround {
   readonly group = new THREE.Group();
   private materials: THREE.MeshBasicMaterial[] = [];
   private loader = new THREE.TextureLoader();
+  /** Tile counts for the loading screen (failed tiles count as done). */
+  total = 0;
+  done = 0;
+  onProgress: (done: number, total: number) => void = () => {};
+  private waiters: (() => void)[] = [];
 
   constructor(private layout: AirportLayout, private style: MapStyle, private maxAniso: number) {
     this.loader.setCrossOrigin('anonymous');
@@ -85,6 +90,7 @@ export class TileGround {
     mesh.visible = false;
     this.group.add(mesh);
     const style = this.style as Exclude<MapStyle, 'plain'>;
+    this.total++;
     this.loader.load(TILE_URL[style](z, x, y), (tex) => {
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.anisotropy = this.maxAniso;
@@ -93,7 +99,23 @@ export class TileGround {
       mat.color.set(this.dim);
       mat.needsUpdate = true;
       mesh.visible = true;
-    }, undefined, () => { /* missing tile: base plane shows through */ });
+      this.tileDone();
+    }, undefined, () => this.tileDone() /* missing tile: base plane shows through */);
+  }
+
+  private tileDone() {
+    this.done++;
+    this.onProgress(this.done, this.total);
+    if (this.done >= this.total * 0.95) for (const w of this.waiters.splice(0)) w();
+  }
+
+  /** Resolves once ~all tiles are in, or after `timeoutMs` (imagery keeps loading behind). */
+  ready(timeoutMs: number): Promise<void> {
+    if (this.done >= this.total * 0.95) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.waiters.push(resolve);
+      setTimeout(resolve, timeoutMs);
+    });
   }
 
   private dim = 0xffffff;
