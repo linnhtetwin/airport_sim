@@ -6,7 +6,7 @@ import { FlightFeed, fetchMetar, type Metar, type Provider } from './data/flight
 import { FlightAwareFeed } from './data/flightaware';
 import { airportWallClock, utcOffsetMinutes } from './data/time';
 import { airlineOf } from './data/airlines';
-import { FT, headingVec } from './geo/projection';
+import { FT, dist, headingVec } from './geo/projection';
 import { LiveTraffic, type LiveTrack } from './live/liveTraffic';
 import { Radio } from './sim/radio';
 import { Simulation, type SimAircraft, type ServiceKind, PHASE_LABEL } from './sim/simulation';
@@ -325,6 +325,14 @@ export class Game {
     for (const t of this.live.tracks.values()) {
       if (t.distKm > 110) continue;
       const f = t.f;
+      let heading = t.heading;
+      if (t.phase === 'Parked') {
+        const near = this.graph.stands.reduce<{ heading: number; distance: number } | null>((best, stand) => {
+          const distance = dist(t.pos, stand.stop.p);
+          return !best || distance < best.distance ? { heading: stand.parkHeading, distance } : best;
+        }, null);
+        if (near && near.distance < 45) heading = near.heading;
+      }
       const airborne = t.alt > 15 && !f.onGround;
       const line2 = airborne ? `${f.altFt != null ? (f.altFt >= 10000 ? 'FL' + String(Math.round(f.altFt / 100)).padStart(3, '0') : Math.round(f.altFt) + 'ft') : ''} ${Math.round(f.gs)}kt` : `${f.type ?? ''} ${Math.round(f.gs)}kt`;
       const route = f.origin || f.dest ? `<i>${f.origin ?? '?'} → ${f.dest ?? '?'}</i>` : `<i>${t.phase}</i>`;
@@ -334,7 +342,7 @@ export class Game {
         category: f.category,
         airline: airlineOf(f.callsign),
         x: t.pos.x, y: t.alt, z: t.pos.z,
-        heading: t.heading,
+        heading,
         pitch: airborne ? Math.max(-3, Math.min(10, f.vrate / 300)) : 0,
         gear: !airborne || t.alt < 600,
         label: `<b>${f.callsign}</b><span>${line2}</span>${route}`,
@@ -387,12 +395,12 @@ export class Game {
     const sel = this.selected();
     if (sel?.kind === 'sim' && sel.ac.stand) {
       const st = sel.ac.stand;
-      const f = headingVec(st.heading);
-      this.world.rampView(new THREE.Vector3(st.stop.p.x - f.x * 20, 0, st.stop.p.z - f.z * 20), st.heading);
+      const f = headingVec(st.parkHeading);
+      this.world.rampView(new THREE.Vector3(st.stop.p.x - f.x * 20, 0, st.stop.p.z - f.z * 20), st.parkHeading);
       return;
     }
     const st = this.graph.stands[Math.floor(Math.random() * this.graph.stands.length)];
-    this.world.rampView(new THREE.Vector3(st.stop.p.x, 0, st.stop.p.z), st.heading);
+    this.world.rampView(new THREE.Vector3(st.stop.p.x, 0, st.stop.p.z), st.parkHeading);
   }
 
   // ---------------- commands ----------------

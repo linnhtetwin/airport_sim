@@ -28,8 +28,10 @@ export interface Stand {
   entry: GNode;
   /** Points from the entry node (on the taxilane) to the stop position. */
   leadIn: XZ[];
-  /** Nose heading of a parked aircraft. */
+  /** Heading of the mapped taxi lead-in; kept unchanged for aircraft motion. */
   heading: number;
+  /** Display heading at the stop, toward the nearby terminal when known. */
+  parkHeading: number;
   maxSpan: number;
   conflicts: number[];
   occupant: string | null;
@@ -125,7 +127,6 @@ export class TaxiGraph {
     }
     this.connectRunwayCrossings();
     this.buildStands();
-    this.alignStandRows();
     this.pruneToMainComponent();
     this.computeStandSizes();
   }
@@ -247,10 +248,11 @@ export class TaxiGraph {
     let k = leadIn.length - 2;
     while (k > 0 && dist(leadIn[k], leadIn[leadIn.length - 1]) < 25) k--;
     const heading = headingOf(leadIn[k], leadIn[leadIn.length - 1]);
+    const parkHeading = this.terminalHeading(stop.p) ?? heading;
     // OSM stand points are often mapped on the terminal edge. Keep the full
     // fuselage footprint outside hard building footprints, sliding along the
     // stand lead-in axis so the stand remains aligned with its taxi lane.
-    const safeStop = this.clearOfBuildings(stop.p, heading);
+    const safeStop = this.clearOfBuildings(stop.p, parkHeading);
     if (safeStop) {
       stop.p = safeStop;
       for (const edge of stop.edges) edge.len = dist(edge.a.p, edge.b.p);
@@ -264,7 +266,32 @@ export class TaxiGraph {
       }, null);
       gateRef = g?.ref ?? `S${idx + 1}`;
     }
-    this.stands.push({ idx, ref: gateRef.replace(/\s+/g, ' ').slice(0, 10), stop, entry, leadIn, heading, maxSpan: 80, conflicts: [], occupant: null });
+    this.stands.push({ idx, ref: gateRef.replace(/\s+/g, ' ').slice(0, 10), stop, entry, leadIn, heading, parkHeading, maxSpan: 80, conflicts: [], occupant: null });
+  }
+
+  private terminalHeading(at: XZ): number | null {
+    let nearest: { point: XZ; distance: number; inside: boolean; inward: XZ } | null = null;
+    for (const terminal of this.layout.polys) {
+      if (terminal.kind !== 'terminal') continue;
+      const inside = pointInPolygon(at, terminal.outer);
+      for (let i = 0; i < terminal.outer.length; i++) {
+        const a = terminal.outer[i], b = terminal.outer[(i + 1) % terminal.outer.length];
+        const hit = projectOnSegment(at, a, b);
+        if (!nearest || hit.d < nearest.distance) {
+          const length = dist(a, b);
+          if (length < 0.01) continue;
+          let inward = { x: -(b.z - a.z) / length, z: (b.x - a.x) / length };
+          const probe = { x: hit.point.x + inward.x, z: hit.point.z + inward.z };
+          if (!pointInPolygon(probe, terminal.outer)) inward = { x: -inward.x, z: -inward.z };
+          nearest = { point: hit.point, distance: hit.d, inside, inward };
+        }
+      }
+    }
+    if (!nearest || nearest.distance > 160) return null;
+    // Gates face the closest terminal facade. The taxi lead-in remains the
+    // source of truth for motion; this angle is used only while parked.
+    if (nearest.distance < 0.1) return headingOf(at, { x: at.x + nearest.inward.x, z: at.z + nearest.inward.z });
+    return nearest.inside ? headingOf(nearest.point, at) : headingOf(at, nearest.point);
   }
 
   private clearOfBuildings(origin: XZ, heading: number): XZ | null {
@@ -292,39 +319,6 @@ export class TaxiGraph {
       }
     }
     return null;
-  }
-
-  private alignStandRows() {
-    // Smooth noisy OSM parking headings within a row while keeping opposing
-    // terminal sides facing their own direction.
-    const source = this.stands.map((s) => s.heading);
-    for (const stand of this.stands) {
-      const f = headingVec(source[stand.idx]);
-      const row = this.stands
-        .filter((other) => other !== stand && dist(other.stop.p, stand.stop.p) < 80)
-        .filter((other) => {
-          const o = headingVec(source[other.idx]);
-          return f.x * o.x + f.z * o.z > 0.5;
-        });
-      if (!row.length) continue;
-      let x = f.x, z = f.z;
-      for (const other of row) {
-        const o = headingVec(source[other.idx]);
-        x += o.x; z += o.z;
-      }
-      const h = (Math.atan2(x, -z) * 180 / Math.PI + 360) % 360;
-      // Avoid letting an unrelated nearby stand rotate this stand across its lead-in.
-      const delta = ((h - source[stand.idx] + 540) % 360) - 180;
-      if (Math.abs(delta) <= 30) {
-        stand.heading = (source[stand.idx] + delta * 0.65 + 360) % 360;
-        const safeStop = this.clearOfBuildings(stand.stop.p, stand.heading);
-        if (safeStop) {
-          stand.stop.p = safeStop;
-          for (const edge of stand.stop.edges) edge.len = dist(edge.a.p, edge.b.p);
-          stand.leadIn[stand.leadIn.length - 1] = safeStop;
-        }
-      }
-    }
   }
 
   private pruneToMainComponent() {

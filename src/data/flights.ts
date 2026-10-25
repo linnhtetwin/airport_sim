@@ -21,6 +21,7 @@ export interface LiveFlight {
   onGround: boolean;
   gs: number; // kt
   track: number; // deg
+  heading?: number; // true nose heading when the provider supplies it
   vrate: number; // ft/min
   squawk?: string;
   origin?: string; // IATA
@@ -67,6 +68,7 @@ async function fetchAdsb(lat: number, lon: number, nm: number): Promise<LiveFlig
     onGround: a.alt_baro === 'ground',
     gs: a.gs ?? 0,
     track: a.track ?? a.true_heading ?? 0,
+    heading: a.true_heading,
     vrate: a.baro_rate ?? a.geom_rate ?? 0,
     squawk: a.squawk,
     seenAt: now - (a.seen_pos ?? 0) * 1000,

@@ -62,13 +62,17 @@ const aircraftAssetLoader = new GLTFLoader();
 const aircraftAssetCache = new Map<string, Promise<THREE.Group | null>>();
 
 function aircraftAsset(spec: TypeSpec): { name: string; yaw: number } | null {
-  // Keep the built-in fuselage/engine layout for types where the five compact
-  // licensed source models would give a visibly incorrect silhouette.
-  if (/^(A34|B74|B75|B76)/.test(spec.code)) return null;
+  // These neutral models have their nose along +X after the GLB's own axis
+  // normalization. A quarter turn points them along the simulator's -Z nose.
+  if (/^B75/.test(spec.code)) return { name: 'B752', yaw: Math.PI / 2 };
+  if (/^B76/.test(spec.code)) return { name: 'B763', yaw: Math.PI / 2 };
+  if (/^(E170|E75L|E190|E195|E295)$/.test(spec.code)) return { name: 'E190', yaw: Math.PI / 2 };
+  // Keep the built-in layout where the available assets have the wrong silhouette.
+  if (/^(A34|B74)/.test(spec.code)) return null;
   if (spec.size === 'jumbo') return spec.code === 'A388' ? { name: 'A380', yaw: Math.PI / 2 } : null;
   if (spec.size === 'wide') {
-    if (/^B78/.test(spec.code)) return { name: 'B787', yaw: 0 };
-    if (/^B77/.test(spec.code)) return { name: 'B787', yaw: 0 };
+    if (/^B78/.test(spec.code)) return { name: 'B787', yaw: Math.PI / 2 };
+    if (/^B77/.test(spec.code)) return { name: 'B787', yaw: Math.PI / 2 };
     return { name: 'A350', yaw: Math.PI / 2 };
   }
   if (spec.size === 'narrow') return /^B73/.test(spec.code)
@@ -129,7 +133,7 @@ function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, 
         standard.customProgramCacheKey = () => 'airport-airline-livery-v1';
         standard.needsUpdate = true;
       }
-      else standard.color.set(tint);
+      else if (standard.name !== 'CAT neutral reference') standard.color.set(tint);
       return clone;
     };
     object.material = Array.isArray(object.material)
@@ -139,8 +143,12 @@ function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, 
   model.updateMatrixWorld(true);
   const originalBox = new THREE.Box3().setFromObject(model);
   const originalSize = originalBox.getSize(new THREE.Vector3());
-  const scale = Math.min(spec.span / originalSize.x, spec.length / originalSize.z);
-  model.scale.setScalar(scale);
+  const spanScale = spec.span / originalSize.x;
+  const lengthScale = spec.length / originalSize.z;
+  // Fit the E-Jet family's length and span independently. In particular, the
+  // E175 is shorter than the E190 while its published wingspan is the same.
+  if (/^(E170|E75L|E190|E195|E295)$/.test(spec.code)) model.scale.set(spanScale, Math.min(spanScale, lengthScale), lengthScale);
+  else model.scale.setScalar(Math.min(spanScale, lengthScale));
   model.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(model);
   const center = box.getCenter(new THREE.Vector3());

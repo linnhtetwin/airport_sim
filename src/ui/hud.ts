@@ -486,7 +486,7 @@ export class Hud {
       grid.innerHTML = `
         <div><small>ALT</small><b>${f.onGround || f.altFt == null ? 'GND' : Math.round(f.altFt).toLocaleString() + ' ft'}</b></div>
         <div><small>GROUND SPD</small><b>${Math.round(f.gs)} kt</b></div>
-        <div><small>TRACK</small><b>${String(Math.round(f.track)).padStart(3, '0')}°</b></div>
+        <div><small>${f.heading != null ? 'TRUE HDG' : 'TRACK'}</small><b>${String(Math.round(f.heading ?? f.track)).padStart(3, '0')}°</b></div>
         <div><small>V/S</small><b>${f.vrate > 0 ? '+' : ''}${Math.round(f.vrate)} fpm</b></div>
         <div><small>SQUAWK</small><b class="${f.squawk === '7700' ? 'late' : ''}">${esc(f.squawk ?? '—')}</b></div>
         <div><small>DISTANCE</small><b>${t.distKm.toFixed(1)} km</b></div>

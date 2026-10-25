@@ -132,8 +132,8 @@ export function buildAirportScene(layout: AirportLayout, graph: TaxiGraph): Airp
   // Point-mapped stands only have their lead-in in the graph.
   for (const s of graph.stands) {
     if (s.leadIn.length === 2) standLine.polyline(s.leadIn, 0.45, false);
-    const f = headingVec(s.heading);
-    standLine.rect({ x: s.stop.p.x + f.x * 2, z: s.stop.p.z + f.z * 2 }, s.heading + 90, 6, 0.6);
+    const f = headingVec(s.parkHeading);
+    standLine.rect({ x: s.stop.p.x + f.x * 2, z: s.stop.p.z + f.z * 2 }, s.parkHeading + 90, 6, 0.6);
   }
   group.add(flatMesh(taxi.build(), 0x6b6e73, -8));
   group.add(flatMesh(taxiLine.build(), 0xe8b923, -6, { lit: false }));

@@ -4,3 +4,14 @@ https://creativecommons.org/licenses/by/4.0/
 
 The logo-free A320, A350, A380, B737, and B787 models are used in Airport Ops Sim.
 They are scaled and oriented for the simulation. No changes were made to their mesh geometry.
+
+Boeing 757-200 (B752.glb), Boeing 767-300 (B763.glb), and Embraer 190
+(E190.glb) neutral models: Bluebell CSL contributors, converted to glTF by
+SDRangel and repackaged by Clear Aviation Tracking without airline textures.
+Geometry is released under CC0 1.0:
+https://creativecommons.org/publicdomain/zero/1.0/
+https://clearaviationtracking.com/map-credits/
+https://github.com/srcejon/sdrangel-3d-models/blob/main/LICENSE
+
+E190.glb also stands in for the closely related E170, E175, E195, and E195-E2
+aircraft, fitted to each type's length and wingspan where applicable.

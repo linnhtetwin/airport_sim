@@ -250,7 +250,7 @@ export class Simulation {
     ac.stand = st;
     st.occupant = ac.id;
     ac.pos = { ...st.stop.p };
-    ac.heading = st.heading;
+    ac.heading = st.parkHeading;
     ac.phase = 'PARKED';
     ac.alt = 0;
     ac.speed = 0;
@@ -711,7 +711,7 @@ export class Simulation {
         this.releaseFollowMe(ac);
         break;
       case 'DOCKING': {
-        ac.heading = ac.stand ? ac.stand.heading : ac.heading;
+        ac.heading = ac.stand ? ac.stand.parkHeading : ac.heading;
         ac.path = null;
         const m = this.marshallers.find((x) => x.acId === ac.id);
         if (m) { m.state = 'STOP'; m.t = 0; }
@@ -1122,9 +1122,9 @@ export class Simulation {
   marshalIn(ac: SimAircraft) {
     if (ac.phase !== 'AT_STAND' || !ac.stand) return;
     const st = ac.stand;
-    const f = headingVec(st.heading);
+    const f = headingVec(st.parkHeading);
     const d = ac.spec.length * 0.5 + 8;
-    this.marshallers.push({ id: `M${ac.id}`, pos: { x: st.stop.p.x + f.x * d, z: st.stop.p.z + f.z * d }, heading: (st.heading + 180) % 360, acId: ac.id, state: 'GUIDE', t: 0 });
+    this.marshallers.push({ id: `M${ac.id}`, pos: { x: st.stop.p.x + f.x * d, z: st.stop.p.z + f.z * d }, heading: (st.parkHeading + 180) % 360, acId: ac.id, state: 'GUIDE', t: 0 });
     // lead-in starts at the entry node, which is where the aircraft is
     ac.path = new Path([ac.pos, ...st.leadIn.slice(1)]);
     ac.s = 0;
