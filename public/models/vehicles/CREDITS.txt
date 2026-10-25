@@ -1,0 +1,8 @@
+Airport ground-service vehicle models from 3DAssets.dev:
+https://3dassets.dev/packs/airport-terminal-and-ground-operations
+
+Selected GLB models are dedicated to the public domain under CC0 1.0 Universal.
+License: https://creativecommons.org/publicdomain/zero/1.0/
+
+Bundled models: baggage tug, baggage cart, pushback tug, catering truck,
+fuel bowser, lavatory service truck, and potable water truck.

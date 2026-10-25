@@ -1,0 +1,6 @@
+Aircraft models: amvlab, https://github.com/amvlab/aircraft-models
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+
+The logo-free A320, A350, A380, B737, and B787 models are used in Airport Ops Sim.
+They are scaled and oriented for the simulation. No changes were made to their mesh geometry.

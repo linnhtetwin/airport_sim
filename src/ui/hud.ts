@@ -165,6 +165,11 @@ export class Hud {
       g.select(id);
       if (lastClick.id === id && now - lastClick.t < 500) {
         g.cameraFollow();
+        requestAnimationFrame(() => {
+          const action = this.el.detailsBody.querySelector<HTMLElement>('.cmds .primary')
+            ?? this.el.detailsBody.querySelector<HTMLElement>('.cmds button');
+          action?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
         lastClick = { id: '', t: 0 };
       } else lastClick = { id, t: now };
     });
@@ -377,7 +382,7 @@ export class Hud {
       this.lastCmdKey = key;
       const airline = ac.airline ? AIRLINES[ac.airline] : undefined;
       const btn = (cmd: string, label: string, on: boolean, primary = false, arg?: string, danger = false) =>
-        `<button data-cmd="${cmd}" ${arg ? `data-arg="${arg}"` : ''} ${on ? '' : 'disabled'} class="${primary && on ? 'primary' : ''}${danger ? ' danger' : ''}">${label}</button>`;
+        on ? `<button data-cmd="${cmd}" ${arg ? `data-arg="${arg}"` : ''} class="${primary ? 'primary' : ''}${danger ? ' danger' : ''}">${label}</button>` : '';
       const rk = req?.key;
       let stands = '';
       if (standPhase) {
@@ -389,6 +394,23 @@ export class Hud {
         const p = s === 'done' ? 100 : Math.round((ac.serviceProgress[k] ?? 0) * 100);
         return `<div class="svc ${s}" data-svc="${k}"><span>${SERVICE_ICON[k]} ${k}</span><i style="--p:${p}%"></i>${s === 'todo' ? btn('service', 'Dispatch', true, false, k) : `<small>${s === 'enroute' ? 'en route' : s === 'working' ? `${p}%` : '✓ done'}</small>`}</div>`;
       }).join('')}${btn('services', 'Dispatch all services', SERVICE_KINDS.some((k) => ac.services[k] === 'todo'), rk === 'services')}</div>` : '';
+      const towerActions = [
+        btn('land', 'Cleared to land', ac.phase === 'APPROACH' && !ac.clearedLand, rk === 'land'),
+        btn('goaround', 'Go around', ac.phase === 'APPROACH', false, undefined, true),
+        btn('cross', `Cross RWY${crossPending ? ' ' + esc(hold!.runway.ref) : ''}`, crossPending && moving, rk === 'cross'),
+        btn('lineup', 'Line up & wait', ac.phase === 'HOLD_SHORT', rk === 'lineup'),
+        btn('takeoff', 'Cleared for takeoff', ['HOLD_SHORT', 'LINED_UP'].includes(ac.phase) || (ac.phase === 'LINEUP' && !ac.takeoffCleared), rk === 'takeoff'),
+        ac.emergency ? btn('fire', '🚒 Alert fire services', !ac.fireAlerted, rk === 'fire', undefined, true) : '',
+      ].join('');
+      const groundActions = [
+        btn('taxiin', `Taxi to stand${ac.stand ? ' ' + esc(ac.stand.ref) : ''}`, ac.phase === 'VACATED' || (ac.phase === 'ROLLOUT' && !ac.taxiCleared), rk === 'taxiin'),
+        stands,
+        btn('followme', '🚗 Follow-me car', ['VACATED', 'TAXI_IN', 'ROLLOUT'].includes(ac.phase) && !ac.followMeId),
+        btn('push', 'Approve pushback', ac.phase === 'READY', rk === 'push'),
+        btn('taxiout', `Taxi to RWY ${esc(sim.depEnd.name)}`, ac.phase === 'PUSHED', rk === 'taxiout'),
+        ac.heldByAtc ? btn('resume', 'Continue taxi', true, true) : btn('hold', 'Hold position', moving),
+      ].join('');
+      const rampActions = [btn('marshal', '🦺 Send marshaller', ac.phase === 'AT_STAND', rk === 'marshal'), svc].join('');
 
       this.el.detailsBody.innerHTML = `
         <div class="d-head ${ac.kind.toLowerCase()}${ac.emergency ? ' emergency' : ''}">
@@ -399,27 +421,9 @@ export class Hud {
         <div class="d-status"><span data-dyn="phase"></span>${req && !req.passive ? `<em class="${req.who.toLowerCase()}">${esc(req.text)}</em>` : ''}</div>
         <div class="d-grid" data-dyn="grid"></div>
         <div class="cmds">
-          <h4>Tower</h4>
-          <div class="row">
-            ${btn('land', 'Cleared to land', ac.phase === 'APPROACH' && !ac.clearedLand, rk === 'land')}
-            ${btn('goaround', 'Go around', ac.phase === 'APPROACH', false, undefined, true)}
-            ${btn('cross', `Cross RWY${crossPending ? ' ' + esc(hold!.runway.ref) : ''}`, crossPending && moving, rk === 'cross')}
-            ${btn('lineup', 'Line up & wait', ac.phase === 'HOLD_SHORT', false)}
-            ${btn('takeoff', 'Cleared for takeoff', ['HOLD_SHORT', 'LINED_UP'].includes(ac.phase) || (ac.phase === 'LINEUP' && !ac.takeoffCleared), rk === 'takeoff' || rk === 'lineup')}
-            ${ac.emergency ? btn('fire', '🚒 Alert fire services', !ac.fireAlerted, rk === 'fire', undefined, true) : ''}
-          </div>
-          <h4>Ground</h4>
-          <div class="row">
-            ${btn('taxiin', `Taxi to stand${ac.stand ? ' ' + esc(ac.stand.ref) : ''}`, ac.phase === 'VACATED' || (ac.phase === 'ROLLOUT' && !ac.taxiCleared), rk === 'taxiin')}
-            ${stands}
-            ${btn('followme', '🚗 Follow-me car', ['VACATED', 'TAXI_IN', 'ROLLOUT'].includes(ac.phase) && !ac.followMeId)}
-            ${btn('push', 'Approve pushback', ac.phase === 'READY', rk === 'push')}
-            ${btn('taxiout', `Taxi to RWY ${esc(sim.depEnd.name)}`, ac.phase === 'PUSHED', rk === 'taxiout')}
-            ${ac.heldByAtc ? btn('resume', 'Continue taxi', true, true) : btn('hold', 'Hold position', moving)}
-          </div>
-          <h4>Ramp & services</h4>
-          <div class="row">${btn('marshal', '🦺 Send marshaller', ac.phase === 'AT_STAND', rk === 'marshal')}</div>
-          ${svc}
+          ${towerActions ? `<h4>Tower</h4><div class="row">${towerActions}</div>` : ''}
+          ${groundActions ? `<h4>Ground</h4><div class="row">${groundActions}</div>` : ''}
+          ${rampActions ? `<h4>Ramp & services</h4><div class="row">${rampActions}</div>` : ''}
         </div>
         <div class="row cam-row"><button data-cmd="follow">Follow camera</button><button data-cmd="tower">Watch from tower</button></div>
         ${this.fleetHtml()}`;

@@ -1,4 +1,4 @@
-import { type XZ, dist, headingOf, projectOnSegment } from '../geo/projection';
+import { type XZ, dist, headingOf, headingVec, pointInPolygon, projectOnSegment } from '../geo/projection';
 import type { AirportLayout, Runway, RunwayEnd } from '../data/osm';
 
 export type EdgeKind = 'taxiway' | 'taxilane' | 'parking' | 'runway' | 'link';
@@ -125,6 +125,7 @@ export class TaxiGraph {
     }
     this.connectRunwayCrossings();
     this.buildStands();
+    this.alignStandRows();
     this.pruneToMainComponent();
     this.computeStandSizes();
   }
@@ -246,6 +247,15 @@ export class TaxiGraph {
     let k = leadIn.length - 2;
     while (k > 0 && dist(leadIn[k], leadIn[leadIn.length - 1]) < 25) k--;
     const heading = headingOf(leadIn[k], leadIn[leadIn.length - 1]);
+    // OSM stand points are often mapped on the terminal edge. Keep the full
+    // fuselage footprint outside hard building footprints, sliding along the
+    // stand lead-in axis so the stand remains aligned with its taxi lane.
+    const safeStop = this.clearOfBuildings(stop.p, heading);
+    if (safeStop) {
+      stop.p = safeStop;
+      for (const edge of stop.edges) edge.len = dist(edge.a.p, edge.b.p);
+      leadIn[leadIn.length - 1] = safeStop;
+    }
     let gateRef = ref;
     if (!gateRef) {
       const g = this.layout.gates.reduce<{ ref: string; d: number } | null>((best, g) => {
@@ -255,6 +265,66 @@ export class TaxiGraph {
       gateRef = g?.ref ?? `S${idx + 1}`;
     }
     this.stands.push({ idx, ref: gateRef.replace(/\s+/g, ' ').slice(0, 10), stop, entry, leadIn, heading, maxSpan: 80, conflicts: [], occupant: null });
+  }
+
+  private clearOfBuildings(origin: XZ, heading: number): XZ | null {
+    const buildings = this.layout.polys.filter((p) => p.kind === 'terminal' || p.kind === 'hangar' || p.kind === 'building');
+    if (!buildings.length) return null;
+    const f = headingVec(heading), r = { x: f.z, z: -f.x };
+    const blocked = (center: XZ) => {
+      // Check the fuselage length rather than the much wider wingspan: wing
+      // overhang is normal at a gate, but the body must never enter a building.
+      for (let d = -40; d <= 40; d += 2) {
+        for (const side of [-3.5, 0, 3.5]) {
+          const p = { x: center.x + f.x * d + r.x * side, z: center.z + f.z * d + r.z * side };
+          if (buildings.some((b) => pointInPolygon(p, b.outer) && !b.holes.some((hole) => pointInPolygon(p, hole)))) return true;
+        }
+      }
+      return false;
+    };
+    if (!blocked(origin)) return null;
+    // Search both directions along the stand axis and use the smallest clear
+    // movement. This handles stands on either side of a terminal consistently.
+    for (let step = 2; step <= 60; step += 2) {
+      for (const sign of [-1, 1]) {
+        const candidate = { x: origin.x + f.x * step * sign, z: origin.z + f.z * step * sign };
+        if (!blocked(candidate)) return candidate;
+      }
+    }
+    return null;
+  }
+
+  private alignStandRows() {
+    // Smooth noisy OSM parking headings within a row while keeping opposing
+    // terminal sides facing their own direction.
+    const source = this.stands.map((s) => s.heading);
+    for (const stand of this.stands) {
+      const f = headingVec(source[stand.idx]);
+      const row = this.stands
+        .filter((other) => other !== stand && dist(other.stop.p, stand.stop.p) < 80)
+        .filter((other) => {
+          const o = headingVec(source[other.idx]);
+          return f.x * o.x + f.z * o.z > 0.5;
+        });
+      if (!row.length) continue;
+      let x = f.x, z = f.z;
+      for (const other of row) {
+        const o = headingVec(source[other.idx]);
+        x += o.x; z += o.z;
+      }
+      const h = (Math.atan2(x, -z) * 180 / Math.PI + 360) % 360;
+      // Avoid letting an unrelated nearby stand rotate this stand across its lead-in.
+      const delta = ((h - source[stand.idx] + 540) % 360) - 180;
+      if (Math.abs(delta) <= 30) {
+        stand.heading = (source[stand.idx] + delta * 0.65 + 360) % 360;
+        const safeStop = this.clearOfBuildings(stand.stop.p, stand.heading);
+        if (safeStop) {
+          stand.stop.p = safeStop;
+          for (const edge of stand.stop.edges) edge.len = dist(edge.a.p, edge.b.p);
+          stand.leadIn[stand.leadIn.length - 1] = safeStop;
+        }
+      }
+    }
   }
 
   private pruneToMainComponent() {

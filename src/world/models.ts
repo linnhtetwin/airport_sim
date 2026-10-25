@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { TypeSpec } from '../data/aircraftTypes';
 import { airlineColors } from '../data/airlines';
 
@@ -49,11 +51,124 @@ function add(parts: ModelParts, m: THREE.Material, g: THREE.BufferGeometry) {
 interface AircraftTemplate {
   meshes: { geo: THREE.BufferGeometry; mat: THREE.Material; gear: boolean }[];
   wingTipX: number;
+  wingTipY: number;
+  wingTipZ: number;
   topY: number;
   length: number;
 }
 
 const templates = new Map<string, AircraftTemplate>();
+const aircraftAssetLoader = new GLTFLoader();
+const aircraftAssetCache = new Map<string, Promise<THREE.Group | null>>();
+
+function aircraftAsset(spec: TypeSpec): { name: string; yaw: number } | null {
+  // Keep the built-in fuselage/engine layout for types where the five compact
+  // licensed source models would give a visibly incorrect silhouette.
+  if (/^(A34|B74|B75|B76)/.test(spec.code)) return null;
+  if (spec.size === 'jumbo') return spec.code === 'A388' ? { name: 'A380', yaw: Math.PI / 2 } : null;
+  if (spec.size === 'wide') {
+    if (/^B78/.test(spec.code)) return { name: 'B787', yaw: 0 };
+    if (/^B77/.test(spec.code)) return { name: 'B787', yaw: 0 };
+    return { name: 'A350', yaw: Math.PI / 2 };
+  }
+  if (spec.size === 'narrow') return /^B73/.test(spec.code)
+    ? { name: 'B737', yaw: Math.PI / 2 }
+    : { name: 'A320', yaw: Math.PI / 2 };
+  return null;
+}
+
+function loadAircraftAsset(name: string): Promise<THREE.Group | null> {
+  let pending = aircraftAssetCache.get(name);
+  if (!pending) {
+    pending = new Promise((resolve) => {
+      aircraftAssetLoader.load(`/models/${name}.glb`, (gltf) => resolve(gltf.scene), undefined, () => resolve(null));
+    });
+    aircraftAssetCache.set(name, pending);
+  }
+  return pending;
+}
+
+function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, airline: string | null): { model: THREE.Group; box: THREE.Box3; tips: THREE.Vector3[] } {
+  const model = new THREE.Group();
+  model.rotation.y = yaw;
+  model.add(source.clone(true));
+  const tint = airlineColors(airline).tail;
+  model.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    const recolor = (material: THREE.Material) => {
+      const clone = material.clone();
+      const standard = clone as THREE.MeshStandardMaterial;
+      if (standard.map) {
+        const liveryColor = new THREE.Color(tint);
+        standard.onBeforeCompile = (shader) => {
+          shader.uniforms.airlineLiveryColor = { value: liveryColor };
+          shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>', '#include <common>\nuniform vec3 airlineLiveryColor;')
+            .replace(
+            '#include <map_fragment>',
+            `#include <map_fragment>
+            vec3 liverySample = diffuseColor.rgb;
+            float liveryMax = max(max(liverySample.r, liverySample.g), liverySample.b);
+            float liveryMin = min(min(liverySample.r, liverySample.g), liverySample.b);
+            float liveryChroma = liveryMax - liveryMin;
+            float liveryHue = 0.0;
+            if (liveryChroma > 0.0001) {
+              if (liveryMax == liverySample.r) liveryHue = mod((liverySample.g - liverySample.b) / liveryChroma, 6.0);
+              else if (liveryMax == liverySample.g) liveryHue = (liverySample.b - liverySample.r) / liveryChroma + 2.0;
+              else liveryHue = (liverySample.r - liverySample.g) / liveryChroma + 4.0;
+              liveryHue /= 6.0;
+              if (liveryHue < 0.0) liveryHue += 1.0;
+            }
+            float liverySaturation = liveryChroma / max(liveryMax, 0.0001);
+            float liveryMask = smoothstep(0.22, 0.42, liverySaturation)
+              * smoothstep(0.46, 0.52, liveryHue)
+              * (1.0 - smoothstep(0.76, 0.82, liveryHue));
+            diffuseColor.rgb = mix(diffuseColor.rgb, airlineLiveryColor, liveryMask * 0.92);`,
+            );
+        };
+        standard.customProgramCacheKey = () => 'airport-airline-livery-v1';
+        standard.needsUpdate = true;
+      }
+      else standard.color.set(tint);
+      return clone;
+    };
+    object.material = Array.isArray(object.material)
+      ? object.material.map(recolor)
+      : recolor(object.material);
+  });
+  model.updateMatrixWorld(true);
+  const originalBox = new THREE.Box3().setFromObject(model);
+  const originalSize = originalBox.getSize(new THREE.Vector3());
+  const scale = Math.min(spec.span / originalSize.x, spec.length / originalSize.z);
+  model.scale.setScalar(scale);
+  model.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(model);
+  const center = box.getCenter(new THREE.Vector3());
+  model.position.set(-center.x, -box.min.y, -center.z);
+  model.updateMatrixWorld(true);
+  const normalizedBox = new THREE.Box3().setFromObject(model);
+  const maxX = normalizedBox.max.x;
+  const tipBand = Math.max(0.15, spec.span * 0.008);
+  const tipSums = [new THREE.Vector3(), new THREE.Vector3()];
+  const tipCounts = [0, 0];
+  model.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    const positions = object.geometry.getAttribute('position');
+    for (let i = 0; i < positions.count; i++) {
+      const point = new THREE.Vector3().fromBufferAttribute(positions, i).applyMatrix4(object.matrixWorld);
+      const side = point.x < 0 ? 0 : 1;
+      const outerX = side === 0 ? normalizedBox.min.x : maxX;
+      if (Math.abs(point.x - outerX) <= tipBand) {
+        tipSums[side].add(point);
+        tipCounts[side]++;
+      }
+    }
+  });
+  const tips = tipSums.map((sum, i) => tipCounts[i]
+    ? sum.multiplyScalar(1 / tipCounts[i])
+    : new THREE.Vector3(i === 0 ? normalizedBox.min.x : normalizedBox.max.x, spec.length * 0.1, spec.length * 0.04));
+  return { model, box: normalizedBox, tips };
+}
 
 function buildTemplate(spec: TypeSpec, airline: string | null): AircraftTemplate {
   const L = spec.length, S = spec.span;
@@ -77,7 +192,7 @@ function buildTemplate(spec: TypeSpec, airline: string | null): AircraftTemplate
     add(parts, dark, new THREE.BoxGeometry(0.15, 1.4, 1.6).translate(0, 2.8, 7.4));
     add(parts, grey, new THREE.BoxGeometry(0.12, 0.12, 3.4).translate(0.9, 0.2, 0));
     add(parts, grey, new THREE.BoxGeometry(0.12, 0.12, 3.4).translate(-0.9, 0.2, 0));
-    return finish(parts, gearParts, S / 2, 4.5, L);
+    return finish(parts, gearParts, S / 2, 4.5, 0, 4.5, L);
   }
 
   const r = spec.size === 'light' ? 0.65 : spec.size === 'jumbo' ? L * 0.052 : L * 0.05;
@@ -87,34 +202,37 @@ function buildTemplate(spec: TypeSpec, airline: string | null): AircraftTemplate
   const zc = -0.04 * L;
   const zFront = zc - Lbody / 2, zBack = zc + Lbody / 2;
 
-  // fuselage
-  add(parts, body, new THREE.CylinderGeometry(r, r, Lbody, 20).rotateX(Math.PI / 2).translate(0, yc, zc));
-  add(parts, body, new THREE.SphereGeometry(r, 20, 12, 0, Math.PI * 2, 0, Math.PI / 2).rotateX(-Math.PI / 2).scale(1, 0.92, (0.12 * L) / r).translate(0, yc - r * 0.04, zFront));
-  const tailLen = L / 2 - zBack;
-  const cone = new THREE.CylinderGeometry(r * 0.22, r, tailLen, 20).rotateX(Math.PI / 2);
-  // sweep the tail cone upwards
-  const pos = cone.attributes.position;
-  for (let i = 0; i < pos.count; i++) {
-    const t = (pos.getZ(i) + tailLen / 2) / tailLen;
-    pos.setY(i, pos.getY(i) + t * r * 0.55);
-  }
-  add(parts, body, cone.translate(0, yc, zBack + tailLen / 2));
-  // cockpit windows + window band + belly accent
-  add(parts, dark, new THREE.BoxGeometry(r * 1.25, r * 0.28, r * 0.9).translate(0, yc + r * 0.42, zFront - 0.035 * L));
-  for (const sx of [-1, 1]) {
-    add(parts, dark, new THREE.BoxGeometry(0.06, r * 0.14, Lbody * 0.86).translate(sx * r * 0.985, yc + r * 0.28, zc));
-    add(parts, accent, new THREE.BoxGeometry(0.06, r * 0.1, Lbody * 0.92).translate(sx * r * 0.95, yc - r * 0.3, zc));
+  // A continuous tapered fuselage avoids the stacked-cylinder/block silhouette.
+  const noseLen = Math.min(L * 0.16, r * 2.8);
+  const tailLen = Math.max(0.1, L / 2 - zBack);
+  const fuselageProfile = [
+    new THREE.Vector2(0.02 * r, -Lbody / 2 - noseLen),
+    new THREE.Vector2(0.42 * r, -Lbody / 2 - noseLen * 0.72),
+    new THREE.Vector2(0.82 * r, -Lbody / 2 - noseLen * 0.28),
+    new THREE.Vector2(r, -Lbody / 2),
+    new THREE.Vector2(r, Lbody / 2 - tailLen * 0.22),
+    new THREE.Vector2(r * 0.72, Lbody / 2 + tailLen * 0.18),
+    new THREE.Vector2(r * 0.22, Lbody / 2 + tailLen * 0.78),
+    new THREE.Vector2(0.02 * r, Lbody / 2 + tailLen),
+  ];
+  add(parts, body, new THREE.LatheGeometry(fuselageProfile, 24).rotateX(Math.PI / 2).translate(0, yc, zc));
+  // Small oval passenger windows sit flush with the curved cabin sides.
+  const windowGeo = new THREE.SphereGeometry(Math.max(0.09, r * 0.09), 8, 6).scale(0.22, 0.7, 1);
+  const windowCount = Math.max(5, Math.floor(Lbody / Math.max(1.2, r * 1.25)));
+  for (const sx of [-1, 1]) for (let i = 0; i < windowCount; i++) {
+    const z = zFront + Lbody * (0.12 + 0.76 * (i / Math.max(1, windowCount - 1)));
+    add(parts, dark, windowGeo.clone().translate(sx * r * 0.96, yc + r * 0.28, z));
   }
 
   // wings
   const half = S / 2;
   const rootChord = spec.size === 'light' ? 1.5 : L * 0.2;
-  const tipChord = rootChord * 0.28;
   const sweepDeg = spec.size === 'light' || spec.size === 'regional' && /AT|DH/.test(spec.code) ? 2 : 27;
   const sweep = Math.tan((sweepDeg * Math.PI) / 180) * half;
   const highWing = spec.size === 'light' || /AT76|DH8D/.test(spec.code);
   const wingY = highWing ? yc + r * 0.85 : yc - r * 0.55;
   const wingZ = highWing ? zc - rootChord * 0.3 : -0.1 * L;
+  const tipChord = rootChord * 0.28;
   const thick = Math.max(0.25, r * 0.16);
   for (const side of [1, -1] as const) {
     add(parts, grey, surface(half, rootChord, tipChord, sweep, thick, side, highWing ? 1 : 5).translate(0, wingY, wingZ));
@@ -181,15 +299,15 @@ function buildTemplate(spec: TypeSpec, airline: string | null): AircraftTemplate
   strut(-mainX, wingZ + rootChord * 0.65, mainWheels);
   if (spec.size === 'jumbo') { strut(r * 0.35, wingZ + rootChord * 0.9, 2); strut(-r * 0.35, wingZ + rootChord * 0.9, 2); }
 
-  const dih = highWing ? 0 : Math.tan((5 * Math.PI) / 180) * half;
-  return finish(parts, gearParts, half, yc + r + (wingY - yc) + dih, L);
+  const dih = Math.sin(((highWing ? 1 : 5) * Math.PI) / 180) * half;
+  return finish(parts, gearParts, half, wingY + dih, wingZ + sweep + tipChord * 0.5, yc + r + (wingY - yc) + dih, L);
 }
 
-function finish(parts: ModelParts, gearParts: ModelParts, wingTipX: number, topY: number, length: number): AircraftTemplate {
+function finish(parts: ModelParts, gearParts: ModelParts, wingTipX: number, wingTipY: number, wingTipZ: number, topY: number, length: number): AircraftTemplate {
   const meshes: AircraftTemplate['meshes'] = [];
   for (const [m, list] of parts.geos) meshes.push({ geo: mergeGeometries(list), mat: m, gear: false });
   for (const [m, list] of gearParts.geos) meshes.push({ geo: mergeGeometries(list), mat: m, gear: true });
-  return { meshes, wingTipX, topY, length };
+  return { meshes, wingTipX, wingTipY, wingTipZ, topY, length };
 }
 
 export interface AircraftModel {
@@ -212,23 +330,46 @@ export function buildAircraft(spec: TypeSpec, airline: string | null): AircraftM
   const root = new THREE.Group();
   const body = new THREE.Group();
   root.add(body);
+  const fallbackAirframe = new THREE.Group();
+  const fallbackGear = new THREE.Group();
+  body.add(fallbackAirframe, fallbackGear);
   const gear: THREE.Object3D[] = [];
   for (const m of t.meshes) {
     const mesh = new THREE.Mesh(m.geo, m.mat);
     mesh.castShadow = true;
-    body.add(mesh);
+    (m.gear ? fallbackGear : fallbackAirframe).add(mesh);
     if (m.gear) gear.push(mesh);
   }
   const red = mat(0xff2a2a, { emissive: true }), green = mat(0x2aff5a, { emissive: true }), white = mat(0xffffff, { emissive: true });
-  const yTip = t.topY - (spec.size === 'heli' ? 0 : spec.length * 0.05);
-  const navL = new THREE.Mesh(lightGeo, red); navL.position.set(-t.wingTipX, yTip, 0);
-  const navR = new THREE.Mesh(lightGeo, green); navR.position.set(t.wingTipX, yTip, 0);
-  const sL = new THREE.Mesh(lightGeo, white); sL.position.set(-t.wingTipX, yTip, 0.6);
-  const sR = new THREE.Mesh(lightGeo, white); sR.position.set(t.wingTipX, yTip, 0.6);
+  const yTip = t.wingTipY + 0.12;
+  const navL = new THREE.Mesh(lightGeo, red); navL.position.set(-t.wingTipX, yTip, t.wingTipZ);
+  const navR = new THREE.Mesh(lightGeo, green); navR.position.set(t.wingTipX, yTip, t.wingTipZ);
+  const strobeZ = t.wingTipZ + Math.max(0.15, spec.length * 0.006);
+  const sL = new THREE.Mesh(lightGeo, white); sL.position.set(-t.wingTipX, yTip, strobeZ);
+  const sR = new THREE.Mesh(lightGeo, white); sR.position.set(t.wingTipX, yTip, strobeZ);
   const beacon = new THREE.Mesh(lightGeo, red);
   beacon.position.set(0, t.topY + 0.2, 0);
   beacon.scale.setScalar(1.3);
   body.add(navL, navR, sL, sR, beacon);
+  const asset = aircraftAsset(spec);
+  if (asset) {
+    loadAircraftAsset(asset.name).then((source) => {
+      if (!source) return;
+      const prepared = prepareAircraftAsset(source, spec, asset.yaw, airline);
+      body.add(prepared.model);
+      fallbackAirframe.visible = false;
+      fallbackGear.visible = false;
+      gear.length = 0;
+      for (let i = 0; i < prepared.tips.length; i++) {
+        const tip = prepared.tips[i];
+        const nav = i === 0 ? navL : navR;
+        const strobe = i === 0 ? sL : sR;
+        nav.position.set(tip.x, tip.y + 0.18, tip.z);
+        strobe.position.set(tip.x, tip.y + 0.28, tip.z + 0.3);
+      }
+      beacon.position.set(0, Math.min(7, spec.length * 0.12) + 0.2, 0);
+    });
+  }
   return { root, body, gear, beacon, strobes: [sL, sR], navLights: [navL, navR], length: t.length };
 }
 
@@ -236,10 +377,46 @@ export function buildAircraft(spec: TypeSpec, airline: string | null): AircraftM
 
 export type VehicleKind = 'fuel' | 'catering' | 'baggage' | 'cleaning' | 'tug' | 'followme' | 'fire';
 
+const vehicleAssetLoader = new GLTFLoader();
+const vehicleAssetCache = new Map<string, Promise<THREE.Group | null>>();
+const vehicleAssetFiles: Partial<Record<VehicleKind, string>> = {
+  fuel: 'fuel-bowser', catering: 'catering-truck', cleaning: 'lavatory-service-truck', tug: 'pushback-tug',
+};
+
+function loadVehicleAsset(name: string): Promise<THREE.Group | null> {
+  let pending = vehicleAssetCache.get(name);
+  if (!pending) {
+    pending = new Promise((resolve) => {
+      vehicleAssetLoader.load(`/models/vehicles/${name}.glb`, (gltf) => resolve(gltf.scene), undefined, () => resolve(null));
+    });
+    vehicleAssetCache.set(name, pending);
+  }
+  return pending;
+}
+
+function fitVehicleAsset(source: THREE.Group, maxWidth: number, maxLength: number): THREE.Group {
+  const model = source.clone(true);
+  // These assets face +Z; the sim's vehicle convention is nose toward -Z.
+  model.rotation.y = Math.PI;
+  model.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(model);
+  const size = bounds.getSize(new THREE.Vector3());
+  const scale = Math.min(maxWidth / size.x, maxLength / size.z);
+  model.scale.setScalar(scale);
+  model.updateMatrixWorld(true);
+  const fitted = new THREE.Box3().setFromObject(model);
+  const center = fitted.getCenter(new THREE.Vector3());
+  model.position.set(-center.x, -fitted.min.y, -center.z);
+  model.traverse((o) => { if (o instanceof THREE.Mesh) o.castShadow = true; });
+  return model;
+}
+
 export function buildVehicle(kind: VehicleKind): THREE.Group {
   const g = new THREE.Group();
+  const fallback = new THREE.Group();
   const box = (w: number, h: number, l: number, color: THREE.ColorRepresentation, x = 0, y = 0, z = 0) => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, l), mat(color, { metal: 0.2, rough: 0.6 }));
+    const radius = Math.min(w, h, l) * 0.12;
+    const m = new THREE.Mesh(new RoundedBoxGeometry(w, h, l, 2, radius), mat(color, { metal: 0.2, rough: 0.6 }));
     m.position.set(x, y + h / 2, z);
     m.castShadow = true;
     g.add(m);
@@ -324,6 +501,44 @@ export function buildVehicle(kind: VehicleKind): THREE.Group {
       wheels(2.7, 11, 0.65);
       flasher(0x2b6cff, 3.25, -3.8);
       break;
+  }
+  // Keep the existing procedural model as a resilient first-frame and load-error fallback.
+  for (const child of [...g.children]) fallback.add(child);
+  g.add(fallback);
+  const assetName = vehicleAssetFiles[kind];
+  if (assetName) {
+    loadVehicleAsset(assetName).then((source) => {
+      if (!source) return;
+      const model = fitVehicleAsset(source, kind === 'tug' ? 3.1 : 2.8, kind === 'catering' ? 9 : kind === 'fuel' ? 9 : kind === 'cleaning' ? 7 : 6);
+      g.add(model);
+      fallback.visible = false;
+      const bounds = new THREE.Box3().setFromObject(model);
+      const beacon = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.18, 0.24), mat(0xffa500, { emissive: true }));
+      beacon.position.set(0, Math.max(1.8, bounds.max.y - 0.12), 0);
+      beacon.name = 'flasher';
+      g.add(beacon);
+    });
+  } else if (kind === 'baggage') {
+    Promise.all([loadVehicleAsset('baggage-tug'), loadVehicleAsset('baggage-cart')]).then(([tug, cart]) => {
+      if (!tug || !cart) return;
+      const train = new THREE.Group();
+      const tractor = fitVehicleAsset(tug, 1.9, 3.2);
+      tractor.position.z = -3.1;
+      train.add(tractor);
+      const trailer = fitVehicleAsset(cart, 2.3, 3.1);
+      for (const z of [0.8, 4.3, 7.8]) {
+        const item = trailer.clone(true);
+        item.position.z += z;
+        train.add(item);
+      }
+      g.add(train);
+      fallback.visible = false;
+      const bounds = new THREE.Box3().setFromObject(train);
+      const beacon = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.18, 0.24), mat(0xffa500, { emissive: true }));
+      beacon.position.set(0, Math.max(1.8, bounds.max.y - 0.12), -3.1);
+      beacon.name = 'flasher';
+      g.add(beacon);
+    });
   }
   return g;
 }

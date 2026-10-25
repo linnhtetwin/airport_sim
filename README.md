@@ -102,7 +102,8 @@ Each panel's **–** button minimises it to its title bar; **+** restores it. Th
 - `src/sim/simulation.ts` — aircraft lifecycle, clearances, runway safety, turnarounds, scoring, auto-controllers
 - `src/sim/vehicles.ts` — ground vehicle fleet with depots
 - `src/live/liveTraffic.ts`, `src/data/flights.ts` — live feeds, dead reckoning, phase classification
-- `src/world/*` — Three.js scene, tiles, airport meshes, procedural aircraft/vehicle models
+- `src/world/*` — Three.js scene, tiles, airport meshes, aircraft and vehicle models
+- `public/models/*` — logo-free GLB airliners from amvlab (CC BY 4.0) and CC0 ground-service vehicles from 3DAssets.dev; see the model credit files
 - `src/ui/*` — start screen, HUD (strips, details, radio, FIDS), radar
 
 This is a game. Don't use it for real-world navigation or ATC.
