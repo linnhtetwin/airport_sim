@@ -24,9 +24,9 @@ The first visit to an airport downloads its layout from OpenStreetMap (Overpass)
 npm run cf:deploy
 ```
 
-Live traffic and weather APIs don't allow direct browser access, so in production they go through a Pages Function, [`functions/api/[[path]].ts`](functions/api/[[path]].ts). It serves the same `/api/adsb`, `/api/opensky`, `/api/fr24` and `/api/awc` paths as the dev proxies. It accepts only GET requests to an allowlist of upstream endpoints, so it can't be used as an open proxy. Free feeds are cached at the edge for a few seconds (METAR for 5 minutes), so players share upstream requests. Flightradar24 requests carry the player's own key and are never cached.
+Live traffic and weather APIs don't allow direct browser access, and the public OpenStreetMap (Overpass) servers reject some site origins. So in production these go through a Pages Function, [`functions/api/[[path]].ts`](functions/api/[[path]].ts). It serves the same `/api/adsb`, `/api/opensky`, `/api/fr24`, `/api/awc` and `/api/overpass` paths as the dev proxies. It accepts only GET requests to an allowlist of upstream endpoints, so it can't be used as an open proxy. Free feeds are cached at the edge for a few seconds (METAR for 5 minutes). Airport layouts are cached for a day, so after the first player loads an airport it opens almost instantly for everyone. Flightradar24 requests carry the player's own key and are never cached.
 
-`npm run cf:dev` runs the built site plus the function locally with wrangler (http://localhost:8788). If you host `dist/` somewhere other than Cloudflare, you need an equivalent proxy for those four paths.
+`npm run cf:dev` runs the built site plus the function locally with wrangler (http://localhost:8788). If you host `dist/` somewhere other than Cloudflare, you need an equivalent proxy for those paths.
 
 ## Data sources
 

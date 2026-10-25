@@ -18,6 +18,7 @@ const proxies = {
   '/api/opensky': proxy('https://opensky-network.org', '/api/opensky'),
   '/api/fr24': proxy('https://fr24api.flightradar24.com', '/api/fr24'),
   '/api/awc': proxy('https://aviationweather.gov', '/api/awc'),
+  '/api/overpass': proxy('https://overpass-api.de', '/api/overpass'),
 };
 
 export default defineConfig({

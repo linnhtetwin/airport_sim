@@ -95,17 +95,19 @@ const MIRRORS = [
 
 async function overpass(query: string, onStatus: (s: string) => void, timeoutMs = 90_000): Promise<OsmElement[]> {
   let lastErr: unknown = null;
-  for (const url of MIRRORS) {
-    const host = new URL(url).host;
+  // First our own proxy (dev server or Pages Function: shared edge cache, no CORS/origin
+  // problems), then the public servers directly as a fallback.
+  const attempts = [
+    // the proxy itself tries several servers within 150 s, so give it a little longer
+    { host: 'OpenStreetMap', url: `/api/overpass/api/interpreter?data=${encodeURIComponent(query)}`, init: {} as RequestInit, wait: Math.max(timeoutMs, 160_000) },
+    ...MIRRORS.map((url) => ({ host: new URL(url).host, url, init: { method: 'POST', body: new URLSearchParams({ data: query }) } as RequestInit, wait: timeoutMs })),
+  ];
+  for (const { host, url, init, wait } of attempts) {
     try {
-      onStatus(`Querying OpenStreetMap (${host})…`);
+      onStatus(`Querying ${host === 'OpenStreetMap' ? 'OpenStreetMap' : `OpenStreetMap (${host})`}…`);
       const ctl = new AbortController();
-      const timer = setTimeout(() => ctl.abort(), timeoutMs);
-      const res = await fetch(url, {
-        method: 'POST',
-        body: new URLSearchParams({ data: query }),
-        signal: ctl.signal,
-      });
+      const timer = setTimeout(() => ctl.abort(), wait);
+      const res = await fetch(url, { ...init, signal: ctl.signal });
       clearTimeout(timer);
       if (!res.ok) throw new Error(`${host}: HTTP ${res.status}`);
       const json = (await res.json()) as { elements: OsmElement[]; remark?: string };
@@ -150,7 +152,7 @@ export async function loadAirport(opts: LoadOptions, onStatus: (s: string) => vo
       const bb = { s: c0.lat - dLat, w: c0.lon - dLon, n: c0.lat + dLat, e: c0.lon + dLon };
       onStatus('Downloading runways, taxiways, aprons and buildings…');
       const body = await overpass(
-        `[out:json][timeout:150][bbox:${bb.s},${bb.w},${bb.n},${bb.e}];` +
+        `[out:json][timeout:110][bbox:${bb.s},${bb.w},${bb.n},${bb.e}];` +
           `nwr["aeroway"="aerodrome"]["icao"="${icao}"]->.ap;.ap map_to_area->.a;` +
           `(.ap;way["aeroway"~"^(${AEROWAY_WAYS})$"];node["aeroway"~"^(${AEROWAY_NODES})$"];` +
           `relation["aeroway"~"^(apron|terminal|hangar)$"];` +

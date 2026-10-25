@@ -54,7 +54,7 @@ export class Game {
   showLabels = true;
   towerTrack = false;
   startLocal = new Date();
-  private clock = new THREE.Clock();
+  private timer = new THREE.Timer();
   private elapsed = 0;
   private liveTimer = 0;
   private liveBusy = false;
@@ -123,7 +123,7 @@ export class Game {
     this.cameraOverview();
     this.bindInput();
     this.setMode(this.mode);
-    this.clock.start();
+    this.timer.connect(document); // resets the delta when the tab comes back from the background
     this.loop();
   }
 
@@ -180,9 +180,10 @@ export class Game {
 
   // ---------------- main loop ----------------
 
-  private loop = () => {
+  private loop = (now?: number) => {
     requestAnimationFrame(this.loop);
-    const dt = Math.min(0.1, this.clock.getDelta());
+    this.timer.update(now);
+    const dt = Math.min(0.1, this.timer.getDelta());
     this.elapsed += dt;
 
     if (!this.paused) {
