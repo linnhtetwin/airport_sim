@@ -531,6 +531,18 @@ export class Hud {
     if (this.fids) { clearInterval(this.fids.timer); clearInterval(this.fids.auto); }
     const st = { board, clock, tab: 'DEP' as 'DEP' | 'ARR', timer: 0, auto: 0 };
     this.fids = st;
+    // column titles sit exactly over the first tile of each column (measured, so any font/size works)
+    const placeHead = () => {
+      const head = q('fidsHead');
+      const cols = board.el.querySelector('.fb-row')?.querySelectorAll<HTMLElement>('.fb-col');
+      if (!cols) return;
+      const x0 = head.getBoundingClientRect().left;
+      head.querySelectorAll<HTMLElement>('span').forEach((s, i) => {
+        if (cols[i]) s.style.left = `${cols[i].getBoundingClientRect().left - x0}px`;
+      });
+    };
+    board.el.addEventListener('scroll', placeHead);
+    window.addEventListener('resize', placeHead);
     const render = () => {
       if (!board.el.isConnected || this.el.modal.classList.contains('hidden')) {
         clearInterval(st.timer);
@@ -542,7 +554,8 @@ export class Hud {
       q('fidsTitle').textContent = dep ? 'DEPARTURES' : 'ARRIVALS';
       q('fidsIcon').textContent = dep ? '🛫' : '🛬';
       const heads = dep ? FIDS_DEP_HEAD : FIDS_ARR_HEAD;
-      q('fidsHead').innerHTML = FIDS_COLS.map((c, i) => `<span style="--n:${c.width}">${heads[i]}</span>`).join('');
+      q('fidsHead').innerHTML = heads.map((h) => `<span>${h}</span>`).join('');
+      placeHead();
       board.set(dep ? this.depRows() : this.arrRows());
       clock.set([{ cells: [hhmm(this.airportNow())] }]);
       box.querySelectorAll<HTMLElement>('[data-fids]').forEach((b) => b.classList.toggle('on', b.dataset.fids === st.tab));
