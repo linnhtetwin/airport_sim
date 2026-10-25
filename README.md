@@ -16,7 +16,17 @@ Open http://localhost:5173, pick an airport and a mode. Direct link: `http://loc
 
 The first visit to an airport downloads its layout from OpenStreetMap (Overpass), which can take 30–90 s when the public servers are busy. After that it's cached in the browser for 30 days.
 
-`npm run build` then `npm run preview` serves a production build. The API proxies in `vite.config.ts` are active in both `dev` and `preview`. If you host the `dist/` folder elsewhere, you need an equivalent proxy for `/api/adsb`, `/api/opensky`, `/api/fr24` and `/api/awc`.
+`npm run build` then `npm run preview` serves a production build. The API proxies in `vite.config.ts` are active in both `dev` and `preview`.
+
+### Deploying to Cloudflare Pages
+
+```bash
+npm run cf:deploy
+```
+
+Live traffic and weather APIs don't allow direct browser access, so in production they go through a Pages Function, [`functions/api/[[path]].ts`](functions/api/[[path]].ts). It serves the same `/api/adsb`, `/api/opensky`, `/api/fr24` and `/api/awc` paths as the dev proxies. It accepts only GET requests to an allowlist of upstream endpoints, so it can't be used as an open proxy. Free feeds are cached at the edge for a few seconds (METAR for 5 minutes), so players share upstream requests. Flightradar24 requests carry the player's own key and are never cached.
+
+`npm run cf:dev` runs the built site plus the function locally with wrangler (http://localhost:8788). If you host `dist/` somewhere other than Cloudflare, you need an equivalent proxy for those four paths.
 
 ## Data sources
 
@@ -28,7 +38,7 @@ The first visit to an airport downloads its layout from OpenStreetMap (Overpass)
 | Flight routes (origin/destination) | adsbdb.com |
 | Wind / active runway | aviationweather.gov METAR |
 
-**Flightradar24:** FR24 only offers a paid API. Choose *Flightradar24 API* under *Options* on the start screen and paste your token. It's stored only in your browser's localStorage and sent only through the local proxy.
+**Flightradar24:** FR24 only offers a paid API. Choose *Flightradar24 API* under *Options* on the start screen and paste your token. It's stored only in your browser's localStorage and is sent only through the game's own proxy (the dev server, or the Pages Function when deployed).
 
 If OpenStreetMap can't be reached, the game generates a stand-in two-runway airport so it stays playable.
 
