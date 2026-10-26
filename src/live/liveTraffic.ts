@@ -28,6 +28,24 @@ export interface LiveTrack {
 /** A real-world event derived from ADS-B data (never from the simulation). */
 export interface LiveEvent { text: string; callsign: string; level: 'info' | 'alert' }
 
+/**
+ * Which way the nose points. Feeds report the ground track (direction of motion) and often a
+ * heading too, but that heading can be stale or wrong, so it's only trusted where it can differ
+ * from the track in real life.
+ */
+export function noseHeading(f: LiveFlight): number {
+  const h = f.heading, trk = f.track;
+  if (h == null) return trk;
+  const crab = Math.abs(angleDiff(h, trk));
+  if (f.onGround) {
+    if (f.gs < 3) return h; // standing still: the track means nothing
+    if (f.gs < 10 && crab > 150) return h; // pushback: moving tail first
+    return trk; // taxiing and on the runway the wheels follow the track
+  }
+  // in the air a crosswind crab of up to ~30° is real; more is bad data
+  return crab <= 30 ? h : trk;
+}
+
 const EMERGENCY_SQUAWK: Record<string, string> = { '7700': 'general emergency', '7600': 'radio failure', '7500': 'unlawful interference' };
 
 /** Real ADS-B traffic, smoothed and dead-reckoned between polls. */
@@ -57,7 +75,7 @@ export class LiveTraffic {
       } else {
         const p = this.proj.toXZ(f.lat, f.lon);
         const alt = f.onGround || f.altFt == null ? 0 : Math.max(0, f.altFt * FT - this.elevation);
-        const nt: LiveTrack = { id, f, pos: p, alt, heading: f.heading ?? f.track, target: p, targetAlt: alt, phase: 'Overflight', distKm: Math.hypot(p.x, p.z) / 1000, firstSeen: now, memo: {} };
+        const nt: LiveTrack = { id, f, pos: p, alt, heading: noseHeading(f), target: p, targetAlt: alt, phase: 'Overflight', distKm: Math.hypot(p.x, p.z) / 1000, firstSeen: now, memo: {} };
         this.tracks.set(id, nt);
         this.detect(nt);
       }
@@ -135,8 +153,7 @@ export class LiveTraffic {
       else t.pos = { x: t.pos.x + dx * k, z: t.pos.z + dz * k };
       t.alt += (t.targetAlt - t.alt) * k;
       const hk = Math.min(1, dt * 2);
-      const trueHeading = f.heading ?? f.track;
-      t.heading = (t.heading + angleDiff(t.heading, trueHeading) * hk + 360) % 360;
+      t.heading = (t.heading + angleDiff(t.heading, noseHeading(f)) * hk + 360) % 360;
       t.distKm = Math.hypot(t.pos.x, t.pos.z) / 1000;
       t.phase = this.classify(t);
     }

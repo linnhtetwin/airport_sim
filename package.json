@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "airports": "node scripts/update-airports.mjs",
+    "airport-positions": "node scripts/update-airport-positions.mjs",
     "cf:dev": "npm run build && npx --yes wrangler pages dev dist --kv AIRPORT_LAYOUTS",
     "cf:deploy": "npm run build && npx --yes wrangler pages deploy dist --project-name airport-ops-sim"
   },

@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - **Preset airports open almost at once.** Their OpenStreetMap layouts ship with the game in `public/airports/`, so first-time players no longer wait 30–90 s for the public Overpass servers. `npm run airports` refreshes them.
 - **Shared airport layout cache.** The new `/api/airport/<ICAO>` endpoint downloads an airport once and serves that copy to every player for 30 days, worldwide when a Cloudflare KV namespace is bound as `AIRPORT_LAYOUTS`. The server builds the query from the ICAO code itself, so cached layouts can't be tampered with. The dev and preview servers provide the same endpoint.
+- **Faster first load for non-preset airports.** The server finds an airport's position in a bundled table of about 19,000 airports from OurAirports (public domain), so it downloads the layout with one OpenStreetMap query instead of two. That's about 40 s instead of 70 s or more, and those loads no longer run out of time while the servers are busy. `npm run airport-positions` refreshes the table.
 - **FlightAware AeroAPI support (optional).** Adds the airport's real schedule: confirmed routes, gates, terminals, scheduled/estimated/actual times, delays, cancellations and diversions.
   - Live Watch: flight details gain a FlightAware block with times at both ends (in each airport's own time zone), gates, delay and route progress. The FIDS board shows the airport's real departures and arrivals with remarks such as BOARDING, FINAL CALL, DELAYED, LANDED and CANCELLED.
   - ATC Simulation: upcoming real arrivals become the planned arrival queue, and real departures are given to aircraft parked on the ramp, at their real times and (when the stand exists) their real gates.
@@ -39,6 +40,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Parked aircraft line up with their stand. Stands mapped in OpenStreetMap as a line now park along that line, nose to the gate, instead of facing the nearest terminal wall (at JFK, 51 of 186 such stands were more than 30° off). A line connected to nothing picks its stop end by geometry, not by the direction it was drawn in.
+- Live parked aircraft snap onto the stand they stand on, matched against the last 55 m of the stand's lead-in line, instead of only within 45 m of the stop point. Their often-stale reported heading is replaced by the stand's.
+- Live aircraft no longer fly or land sideways on bad heading data. In the air the reported heading is used only within a realistic 30° crab of the track. On the ground the nose follows the track, except during pushback.
 - E-Jets drawn with another type's size (E170, E175, E195, E195-E2) had their length and wingspan scaling swapped.
 - Navigation lights and beacons are scaled to the aircraft, instead of airliner-sized spheres on light aircraft and helicopters.
 - Aircraft headings: parked live aircraft snap to their stand's heading, live aircraft point along their real nose heading instead of their ground track when the feed provides it, and the B787 / B777 models are no longer rotated 90°.

@@ -7,7 +7,7 @@
 // used as an open proxy. Responses are cached at the edge so many players share one upstream
 // request (and stay inside the free APIs' rate limits).
 
-import { AIRPORTS } from '../../src/data/airports';
+import { airportPosition } from '../../src/data/airportPositions';
 import { LAYOUT_VERSION, LayoutNotFound, fetchLayout, isLayoutFile } from '../../src/data/airportSource';
 
 interface Upstream {
@@ -101,7 +101,8 @@ async function flightAware(request: Request, path: string, env: Context['env']):
 // layout is downloaded once and then served to every player, worldwide, for 30 days:
 //  - from the KV namespace bound as AIRPORT_LAYOUTS (global), or without it from this data
 //    centre's cache only;
-//  - the query is built here from the ICAO code (preset centre, else an OpenStreetMap lookup),
+//  - the query is built here from the ICAO code (position from the preset or OurAirports, else
+//    a slow OpenStreetMap search),
 //    so a request can't store anything but that airport's real layout under its code.
 // Preset airports are also prebuilt into the site (public/airports), so they rarely get here.
 const LAYOUT_TTL = 30 * 86_400;
@@ -135,9 +136,8 @@ async function airportLayout(icao: string, env: Context['env'], waitUntil: Conte
     return res;
   };
   try {
-    const preset = AIRPORTS.find((a) => a.icao === icao);
     // the game's own request gives up at 160 s
-    const file = await fetchLayout(icao, preset ? { lat: preset.lat, lon: preset.lon } : null, { userAgent: USER_AGENT, budgetMs: 150_000 });
+    const file = await fetchLayout(icao, airportPosition(icao), { userAgent: USER_AGENT, budgetMs: 150_000 });
     if (!isLayoutFile(file, icao)) throw new Error('unexpected layout');
     const body = JSON.stringify(file);
     return save(reply(body, 200, LAYOUT_TTL, 'openstreetmap'), body, LAYOUT_TTL);

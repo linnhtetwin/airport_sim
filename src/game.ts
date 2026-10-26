@@ -6,7 +6,7 @@ import { FlightFeed, fetchMetar, type Metar, type Provider } from './data/flight
 import { FlightAwareFeed } from './data/flightaware';
 import { airportWallClock, utcOffsetMinutes } from './data/time';
 import { airlineOf } from './data/airlines';
-import { FT, dist, headingVec } from './geo/projection';
+import { FT, headingVec } from './geo/projection';
 import { LiveTraffic, type LiveTrack } from './live/liveTraffic';
 import { Radio } from './sim/radio';
 import { Simulation, type SimAircraft, type ServiceKind, PHASE_LABEL } from './sim/simulation';
@@ -320,18 +320,28 @@ export class Game {
     return out;
   }
 
+  /** Stand a parked live aircraft is on, worked out again only when a new position arrives. */
+  private liveStand(t: LiveTrack) {
+    let memo = this.liveStands.get(t);
+    if (!memo || memo.seenAt !== t.f.seenAt) {
+      memo = { seenAt: t.f.seenAt, on: this.graph.standAt(t.pos) };
+      this.liveStands.set(t, memo);
+    }
+    return memo.on;
+  }
+  private liveStands = new WeakMap<LiveTrack, { seenAt: number; on: ReturnType<TaxiGraph['standAt']> }>();
+
   liveRenders(): AcRender[] {
     const out: AcRender[] = [];
     for (const t of this.live.tracks.values()) {
       if (t.distKm > 110) continue;
       const f = t.f;
-      let heading = t.heading;
+      let heading = t.heading, x = t.pos.x, z = t.pos.z;
+      // A parked aircraft's reported heading is often stale (left over from landing). On a
+      // stand it lines up with the stand's lead-in line instead, nose toward the gate.
       if (t.phase === 'Parked') {
-        const near = this.graph.stands.reduce<{ heading: number; distance: number } | null>((best, stand) => {
-          const distance = dist(t.pos, stand.stop.p);
-          return !best || distance < best.distance ? { heading: stand.parkHeading, distance } : best;
-        }, null);
-        if (near && near.distance < 45) heading = near.heading;
+        const on = this.liveStand(t);
+        if (on) { heading = on.stand.parkHeading; x = on.point.x; z = on.point.z; }
       }
       const airborne = t.alt > 15 && !f.onGround;
       const line2 = airborne ? `${f.altFt != null ? (f.altFt >= 10000 ? 'FL' + String(Math.round(f.altFt / 100)).padStart(3, '0') : Math.round(f.altFt) + 'ft') : ''} ${Math.round(f.gs)}kt` : `${f.type ?? ''} ${Math.round(f.gs)}kt`;
@@ -341,7 +351,7 @@ export class Game {
         type: f.type ?? '',
         category: f.category,
         airline: airlineOf(f.callsign),
-        x: t.pos.x, y: t.alt, z: t.pos.z,
+        x, y: t.alt, z,
         heading,
         pitch: airborne ? Math.max(-3, Math.min(10, f.vrate / 300)) : 0,
         gear: !airborne || t.alt < 600,

@@ -199,6 +199,12 @@ export class TaxiGraph {
       if (!first || !last) continue;
       let stop = last, start = first;
       if (last.edges.length > 1 && first.edges.length === 1) { stop = first; start = last; }
+      else if (last.edges.length === 1 && first.edges.length === 1) {
+        // connected at neither end: the aircraft stops at the end away from the taxiways
+        // (the direction a mapper drew the line in says nothing)
+        const away = (n: GNode) => this.nearestEdge(n.p, taxiOnly)?.d ?? 0;
+        if (away(first) > away(last)) { stop = first; start = last; }
+      }
       if (start.edges.length === 1) {
         // lead-in not connected to the network: snap its open end
         const near = this.nearestEdge(start.p, taxiOnly);
@@ -206,7 +212,7 @@ export class TaxiGraph {
         const sn = this.splitEdge(near.e, near.p);
         this.addEdge(sn, start, 'parking');
       }
-      this.registerStand(s.ref, stop);
+      this.registerStand(s.ref, stop, true);
       used.push(stop.p);
     }
     // Point-mapped stands: create a straight lead-in from the nearest taxilane.
@@ -219,12 +225,13 @@ export class TaxiGraph {
       const entry = this.splitEdge(near.e, near.p);
       const stop = this.newNode(p);
       this.addEdge(entry, stop, 'parking');
-      this.registerStand(s.ref, stop);
+      this.registerStand(s.ref, stop, false);
       used.push(p);
     }
   }
 
-  private registerStand(ref: string, stop: GNode) {
+  /** `mapped`: the lead-in is the stand's own line from the map, not one made up here. */
+  private registerStand(ref: string, stop: GNode, mapped: boolean) {
     const idx = this.stands.length;
     // walk back along parking edges to the taxilane network
     const chain: GNode[] = [stop];
@@ -248,7 +255,9 @@ export class TaxiGraph {
     let k = leadIn.length - 2;
     while (k > 0 && dist(leadIn[k], leadIn[leadIn.length - 1]) < 25) k--;
     const heading = headingOf(leadIn[k], leadIn[leadIn.length - 1]);
-    const parkHeading = this.terminalHeading(stop.p) ?? heading;
+    // A mapped lead-in line is drawn along the parked aircraft, so it gives the heading.
+    // A point stand only has a made-up lead-in from the nearest taxilane: face the terminal.
+    const parkHeading = mapped ? heading : this.terminalHeading(stop.p) ?? heading;
     // OSM stand points are often mapped on the terminal edge. Keep the full
     // fuselage footprint outside hard building footprints, sliding along the
     // stand lead-in axis so the stand remains aligned with its taxi lane.
@@ -395,6 +404,31 @@ export class TaxiGraph {
   }
 
   /** Distance of a point along a runway end's centreline from its threshold. */
+  /**
+   * The stand an aircraft standing at p is parked on: within `lateral` metres of the last
+   * 55 m of a stand's lead-in line (further out it's waiting on the taxilane, not parked).
+   * Also returns p moved onto that line.
+   */
+  standAt(p: XZ, lateral = 18): { stand: Stand; point: XZ } | null {
+    let best: { stand: Stand; point: XZ; d: number } | null = null;
+    for (const stand of this.stands) {
+      const stop = stand.stop.p;
+      if (Math.abs(p.x - stop.x) > 100 || Math.abs(p.z - stop.z) > 100) continue;
+      const line = stand.leadIn;
+      let back = 0; // distance along the line from the stop to line[i]
+      for (let i = line.length - 1; i > 0 && back < 55; i--) {
+        const hit = projectOnSegment(p, line[i - 1], line[i]);
+        const along = back + dist(hit.point, line[i]);
+        back += dist(line[i - 1], line[i]);
+        if (along > 55) continue;
+        // reported positions often lie a little past the stop mark, toward the building
+        const reach = i === line.length - 1 && hit.t === 1 ? 30 : lateral;
+        if (hit.d < reach && (!best || hit.d < best.d)) best = { stand, point: hit.point, d: hit.d };
+      }
+    }
+    return best && { stand: best.stand, point: best.point };
+  }
+
   static alongRunway(end: RunwayEnd, p: XZ): number {
     const r = (end.heading * Math.PI) / 180;
     return (p.x - end.threshold.x) * Math.sin(r) - (p.z - end.threshold.z) * Math.cos(r);

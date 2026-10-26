@@ -1,5 +1,5 @@
 import { defineConfig, loadEnv, type Plugin, type ProxyOptions } from 'vite';
-import { AIRPORTS } from './src/data/airports.ts';
+import { airportPosition } from './src/data/airportPositions.ts';
 import { LayoutNotFound, fetchLayout } from './src/data/airportSource.ts';
 
 // Browser CORS blocks most flight/weather APIs, so the dev (and preview) server proxies them.
@@ -38,8 +38,7 @@ function airportApi(): Plugin {
     if (!icao || req.method !== 'GET') return next();
     let pending = layouts.get(icao);
     if (!pending) {
-      const preset = AIRPORTS.find((a) => a.icao === icao);
-      pending = fetchLayout(icao, preset ? { lat: preset.lat, lon: preset.lon } : null, { userAgent: UA, budgetMs: 150_000 })
+      pending = fetchLayout(icao, airportPosition(icao), { userAgent: UA, budgetMs: 150_000 })
         .then((file) => ({ status: 200, body: JSON.stringify(file) }))
         .catch((e: Error) => {
           if (e instanceof LayoutNotFound) return { status: 404, body: JSON.stringify({ notFound: true, error: e.message }) };
