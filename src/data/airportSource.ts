@@ -2,8 +2,8 @@
 // Pages Function, the dev server (vite.config.ts) and scripts/update-airports.mjs, which
 // prebuilds the preset airports. Only fetch is used here: no DOM, no Node APIs.
 
-import type { LatLon } from '../geo/projection';
-import type { OsmElement } from './osm';
+import type { LatLon } from '../geo/projection.ts';
+import type { OsmElement } from './osm.ts';
 
 /** Bump when the query or the stored format changes: old caches and prebuilt files are then ignored. */
 export const LAYOUT_VERSION = 3;

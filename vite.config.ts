@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv, type Plugin, type ProxyOptions } from 'vite';
-import { AIRPORTS } from './src/data/airports';
-import { LayoutNotFound, fetchLayout } from './src/data/airportSource';
+import { AIRPORTS } from './src/data/airports.ts';
+import { LayoutNotFound, fetchLayout } from './src/data/airportSource.ts';
 
 // Browser CORS blocks most flight/weather APIs, so the dev (and preview) server proxies them.
 const UA = 'AirportOpsSim/0.1 (educational simulation)';
