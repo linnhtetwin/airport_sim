@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **Preset airports open almost at once.** Their OpenStreetMap layouts ship with the game in `public/airports/`, so first-time players no longer wait 30–90 s for the public Overpass servers. `npm run airports` refreshes them.
+- **Shared airport layout cache.** The new `/api/airport/<ICAO>` endpoint downloads an airport once and serves that copy to every player for 30 days, worldwide when a Cloudflare KV namespace is bound as `AIRPORT_LAYOUTS`. The server builds the query from the ICAO code itself, so cached layouts can't be tampered with. The dev and preview servers provide the same endpoint.
 - **FlightAware AeroAPI support (optional).** Adds the airport's real schedule: confirmed routes, gates, terminals, scheduled/estimated/actual times, delays, cancellations and diversions.
   - Live Watch: flight details gain a FlightAware block with times at both ends (in each airport's own time zone), gates, delay and route progress. The FIDS board shows the airport's real departures and arrivals with remarks such as BOARDING, FINAL CALL, DELAYED, LANDED and CANCELLED.
   - ATC Simulation: upcoming real arrivals become the planned arrival queue, and real departures are given to aircraft parked on the ramp, at their real times and (when the stand exists) their real gates.
@@ -29,7 +31,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Simulation and Live Watch are now fully separate. The simulation pauses in Live Watch, and its radio calls, alerts, toasts and voice never appear there. Each mode keeps its own log.
 - The command panel only shows the actions that are currently possible, and scrolls the suggested action into view.
 - Parked aircraft face the nearest terminal facade, and stands mapped on a building edge are moved so the fuselage stays outside the building.
-- OpenStreetMap layouts are requested through the game's own proxy first (shared edge cache, no origin rejections), then directly from public Overpass mirrors.
+- Airport layouts load from the browser cache, then the bundled file, then `/api/airport`, and only then directly from the public Overpass servers. This replaces the `/api/overpass` proxy, which cached each layout per Cloudflare data centre only.
 - Flight-route lookups (adsbdb.com) go through the proxy, treat unknown callsigns as normal answers, and back off for two minutes when rate limited.
 - FIDS split-flap board: column widths scale to the board's width, headings line up exactly over their columns, and the flap split line no longer cuts through letters.
 - Upgraded to three.js r186, TypeScript 7 and Vite 8; added wrangler as a dev dependency.

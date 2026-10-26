@@ -7,6 +7,9 @@
 // used as an open proxy. Responses are cached at the edge so many players share one upstream
 // request (and stay inside the free APIs' rate limits).
 
+import { AIRPORTS } from '../../src/data/airports';
+import { LAYOUT_VERSION, LayoutNotFound, fetchLayout, isLayoutFile } from '../../src/data/airportSource';
+
 interface Upstream {
   /** Upstream base URL; with several, they're tried in order until one answers OK. */
   origin: string | string[];
@@ -16,12 +19,8 @@ interface Upstream {
   ttl: number;
   /** Request headers passed through from the browser. */
   forward?: string[];
-  /** Longest query string accepted (default 400 characters). */
-  maxQuery?: number;
-  /** Total time budget in ms across all origins (default 15 s); the browser waits a little longer. */
+  /** Total time budget in ms across all origins (default 15 s). */
   timeout?: number;
-  /** Body check before caching: a "200 OK" that is really an error must not be cached. */
-  cacheable?: (body: string) => boolean;
   /** Treat upstream 404 as an ordinary, cacheable answer (passed on as 200). */
   notFoundOk?: boolean;
 }
@@ -38,18 +37,6 @@ const UPSTREAMS: Record<string, Upstream> = {
   // adsbdb.com flight routes by callsign. "Unknown callsign" is a 404 there; it's answered as
   // a normal (cached) reply so browsers don't log an error for every unknown flight.
   adsbdb: { origin: 'https://api.adsbdb.com', paths: /^\/v0\/callsign\/[A-Za-z0-9]{2,10}$/, ttl: 21_600, notFoundOk: true },
-  // OpenStreetMap Overpass (airport layouts). Public servers reject some browser origins, and
-  // layouts rarely change, so good answers are cached for a day for every player.
-  overpass: {
-    origin: ['https://overpass-api.de', 'https://overpass.private.coffee', 'https://overpass.kumi.systems'],
-    paths: /^\/api\/interpreter$/,
-    ttl: 86_400,
-    maxQuery: 4000,
-    timeout: 150_000, // the game's own request gives up at 160 s
-
-    // overloaded servers answer 200 with a "remark" instead of (complete) data
-    cacheable: (body) => body.trimStart().startsWith('{') && !/"remark"\s*:\s*"[^"]*(error|timed out|timeout|out of memory)/i.test(body.slice(-3000)),
-  },
 };
 
 const USER_AGENT = 'AirportOpsSim/0.1 (+https://airport-ops-sim.pages.dev)';
@@ -59,9 +46,14 @@ interface Context {
   request: Request;
   params: { path?: string | string[] };
   waitUntil(p: Promise<unknown>): void;
-  env: { FLIGHTAWARE_API_KEY?: string };
+  env: { FLIGHTAWARE_API_KEY?: string; AIRPORT_LAYOUTS?: KVNamespace };
 }
 declare const caches: { default: Cache };
+// Minimal shape of a Workers KV namespace binding.
+interface KVNamespace {
+  get(key: string, options: { type: 'text'; cacheTtl?: number }): Promise<string | null>;
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+}
 
 const fail = (status: number, message: string) =>
   new Response(JSON.stringify({ error: message }), {
@@ -104,25 +96,73 @@ async function flightAware(request: Request, path: string, env: Context['env']):
   });
 }
 
+// Airport layouts from OpenStreetMap, one shared copy per airport, keyed by ICAO code.
+// The public Overpass servers are often at capacity and take 30 s or more per airport, so a
+// layout is downloaded once and then served to every player, worldwide, for 30 days:
+//  - from the KV namespace bound as AIRPORT_LAYOUTS (global), or without it from this data
+//    centre's cache only;
+//  - the query is built here from the ICAO code (preset centre, else an OpenStreetMap lookup),
+//    so a request can't store anything but that airport's real layout under its code.
+// Preset airports are also prebuilt into the site (public/airports), so they rarely get here.
+const LAYOUT_TTL = 30 * 86_400;
+const NOT_FOUND_TTL = 86_400;
+
+async function airportLayout(icao: string, env: Context['env'], waitUntil: Context['waitUntil']): Promise<Response> {
+  if (!/^[A-Z0-9]{4}$/.test(icao)) return fail(400, 'Request not allowed');
+  const kv = env.AIRPORT_LAYOUTS;
+  const key = `layout:v${LAYOUT_VERSION}:${icao}`;
+  const edgeKey = new Request(`https://airport-layouts.invalid/${key}`);
+  const reply = (body: string, status: number, ttl: number, source: string) =>
+    new Response(body, {
+      status,
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': `public, max-age=${Math.min(ttl, 86_400)}`,
+        'X-Layout': status === 200 ? source : 'not-found',
+      },
+    });
+
+  const stored = kv ? await kv.get(key, { type: 'text', cacheTtl: 3600 }) : null;
+  if (stored) return reply(stored, stored.startsWith('{"notFound"') ? 404 : 200, LAYOUT_TTL, 'kv');
+  const hit = await caches.default.match(edgeKey);
+  if (hit) return hit;
+
+  const save = (res: Response, body: string, ttl: number) => {
+    waitUntil(Promise.all([
+      kv?.put(key, body, { expirationTtl: ttl }),
+      caches.default.put(edgeKey, res.clone()),
+    ]));
+    return res;
+  };
+  try {
+    const preset = AIRPORTS.find((a) => a.icao === icao);
+    // the game's own request gives up at 160 s
+    const file = await fetchLayout(icao, preset ? { lat: preset.lat, lon: preset.lon } : null, { userAgent: USER_AGENT, budgetMs: 150_000 });
+    if (!isLayoutFile(file, icao)) throw new Error('unexpected layout');
+    const body = JSON.stringify(file);
+    return save(reply(body, 200, LAYOUT_TTL, 'openstreetmap'), body, LAYOUT_TTL);
+  } catch (e) {
+    const message = (e as Error).message;
+    if (!(e instanceof LayoutNotFound)) return fail(502, message);
+    // remembered for a day, so unknown codes don't keep the Overpass servers busy
+    const body = JSON.stringify({ notFound: true, error: message });
+    return save(reply(body, 404, NOT_FOUND_TTL, ''), body, NOT_FOUND_TTL);
+  }
+}
+
 export const onRequest = async ({ request, params, waitUntil, env }: Context): Promise<Response> => {
   if (request.method !== 'GET' && request.method !== 'HEAD') return fail(405, 'Method not allowed');
 
   const segments = Array.isArray(params.path) ? params.path : params.path ? [params.path] : [];
   const [service, ...rest] = segments;
   if (service === 'flightaware') return flightAware(request, '/' + rest.join('/'), env ?? {});
+  if (service === 'airport' && rest.length === 1) return airportLayout(rest[0].toUpperCase(), env ?? {}, waitUntil);
   const up = service ? UPSTREAMS[service] : undefined;
   if (!up) return fail(404, 'Unknown API');
 
   const path = '/' + rest.join('/');
   const url = new URL(request.url);
-  if (!up.paths.test(path) || url.search.length > (up.maxQuery ?? 400)) return fail(400, 'Request not allowed');
-
-  // Services with a body check are cached by hand (after checking); the rest use the fetch cache.
-  const cacheKey = new Request(url.toString(), { method: 'GET' });
-  if (up.cacheable) {
-    const hit = await caches.default.match(cacheKey);
-    if (hit) return hit;
-  }
+  if (!up.paths.test(path) || url.search.length > 400) return fail(400, 'Request not allowed');
 
   const headers = new Headers({ 'User-Agent': USER_AGENT, Accept: request.headers.get('Accept') ?? 'application/json' });
   for (const h of up.forward ?? []) {
@@ -145,7 +185,7 @@ export const onRequest = async ({ request, params, waitUntil, env }: Context): P
         headers,
         signal: AbortSignal.timeout(slice),
         // shared edge cache for the upstream response; error statuses aren't cached
-        cf: up.ttl > 0 && !up.cacheable
+        cf: up.ttl > 0
           ? { cacheTtlByStatus: up.notFoundOk ? { '200-299': up.ttl, '404': up.ttl, '500-599': 0 } : { '200-299': up.ttl, '300-599': 0 }, cacheEverything: true }
           : { cacheTtl: 0 },
       } as RequestInit);
@@ -159,17 +199,6 @@ export const onRequest = async ({ request, params, waitUntil, env }: Context): P
   if (!res) return fail(502, `Upstream unavailable (${lastError})`);
 
   const contentType = res.headers.get('Content-Type') ?? 'application/json';
-  if (up.cacheable && res.ok) {
-    const body = await res.text();
-    const good = up.cacheable(body);
-    const out = new Response(body, {
-      status: 200,
-      headers: { 'Content-Type': contentType, 'Cache-Control': good ? `public, max-age=${up.ttl}` : 'no-store', 'X-Upstream': service },
-    });
-    if (good) waitUntil(caches.default.put(cacheKey, out.clone()));
-    return out;
-  }
-
   const ok = res.ok || (up.notFoundOk && res.status === 404);
   const out = new Response(res.body, { status: ok ? 200 : res.status });
   out.headers.set('Content-Type', contentType);

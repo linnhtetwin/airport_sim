@@ -18,7 +18,15 @@ npm run dev
 
 Open http://localhost:5173, pick an airport and a mode. Direct link: `http://localhost:5173/?icao=EGLL&mode=live`.
 
-The first visit to an airport downloads its layout from OpenStreetMap (Overpass), which can take 30–90 s when the public servers are busy. The loading screen shows each step and the download progress. After that the layout is cached in the browser for 30 days.
+Airport layouts come from OpenStreetMap. The 16 preset airports ship with the game (`public/airports/`), so they open in a second or two. Any other airport is fetched by the game's own `/api/airport/<ICAO>` endpoint, which queries the public Overpass servers. The first time anyone opens that airport this can take 30–90 s, because those servers are often busy. After that the game's server keeps a copy for every player (see below), and each browser also caches it for 30 days. The loading screen shows each step and the download progress.
+
+### Updating the bundled airport layouts
+
+```bash
+npm run airports
+```
+
+This downloads the preset airports again from OpenStreetMap into `public/airports/<ICAO>.json`, one at a time (about 30–60 s each, with retries when the servers are busy). `npm run airports -- EGLL KJFK` updates just those airports. Run it now and then to pick up map edits, and after adding a preset to `src/data/airports.ts`. It needs Node 22.18 or newer.
 
 `npm run build` then `npm run preview` serves a production build. The API proxies in `vite.config.ts` are active in both `dev` and `preview`.
 
@@ -28,9 +36,17 @@ The first visit to an airport downloads its layout from OpenStreetMap (Overpass)
 npm run cf:deploy
 ```
 
-Live traffic and weather APIs don't allow direct browser access, and the public OpenStreetMap (Overpass) servers reject some site origins. So in production these go through a Pages Function, [`functions/api/[[path]].ts`](functions/api/[[path]].ts). It serves the same `/api/adsb`, `/api/opensky`, `/api/fr24`, `/api/awc`, `/api/overpass`, `/api/adsbdb` and `/api/flightaware` paths as the dev proxies. It accepts only GET requests to an allowlist of upstream endpoints, so it can't be used as an open proxy. Free feeds are cached at the edge for a few seconds (METAR for 5 minutes, flight routes for 6 hours). Airport layouts are cached for a day, so after the first player loads an airport it opens almost instantly for everyone. Flightradar24 requests carry the player's own key and are never cached.
+Live traffic and weather APIs don't allow direct browser access, and the public OpenStreetMap (Overpass) servers are slow and reject some site origins. So in production these go through a Pages Function, [`functions/api/[[path]].ts`](functions/api/[[path]].ts). It serves the same `/api/adsb`, `/api/opensky`, `/api/fr24`, `/api/awc`, `/api/adsbdb`, `/api/flightaware` and `/api/airport` paths as the dev server. It accepts only GET requests to an allowlist of upstream endpoints, so it can't be used as an open proxy. Free feeds are cached at the edge for a few seconds (METAR for 5 minutes, flight routes for 6 hours). Flightradar24 requests carry the player's own key and are never cached.
 
-`npm run cf:dev` runs the built site plus the function locally with wrangler (http://localhost:8788). If you host `dist/` somewhere other than Cloudflare, you need an equivalent proxy for those paths.
+`/api/airport/<ICAO>` builds the OpenStreetMap query itself from the ICAO code, so a request can't store anything except that airport's real layout. It keeps one copy per airport for 30 days, which every player then gets at once. Unknown codes are remembered for a day. To share that copy worldwide, bind a KV namespace:
+
+```bash
+npx wrangler kv namespace create airport-layouts
+```
+
+Then, in the Cloudflare dashboard, open the Pages project → *Settings* → *Bindings* → *Add* → *KV namespace*, use the variable name `AIRPORT_LAYOUTS` and pick that namespace, for both Production and Preview. Redeploy afterwards. Without the binding the endpoint still works, but each Cloudflare data centre keeps its own copy for a day only, so players in other regions may wait again.
+
+`npm run cf:dev` runs the built site plus the function locally with wrangler (http://localhost:8788), with a local `AIRPORT_LAYOUTS` namespace. If you host `dist/` somewhere other than Cloudflare, you need an equivalent proxy for those paths.
 
 ## How to play (ATC Simulation)
 
@@ -105,7 +121,9 @@ The deployed site uses Google Analytics with Consent Mode v2. No analytics cooki
 
 ## Code map
 
-- `src/data/osm.ts` — Overpass download and parsing into an airport layout (merges split runways, multipolygons)
+- `src/data/osm.ts` — loads an airport layout (browser cache → bundled file → `/api/airport` → public Overpass servers) and parses it (merges split runways, multipolygons)
+- `src/data/airportSource.ts` — the Overpass queries and server-side download, shared by the game, the Pages Function, the dev server and the update script
+- `scripts/update-airports.mjs`, `public/airports/*` — prebuilt layouts for the preset airports
 - `src/data/flightaware.ts` — FlightAware AeroAPI schedule feed
 - `src/data/time.ts` — airport time zones and local wall-clock time
 - `src/sim/taxiGraph.ts` — taxi network graph, stand detection and parking headings, runway exits/entries, A* routing
@@ -115,7 +133,7 @@ The deployed site uses Google Analytics with Consent Mode v2. No analytics cooki
 - `src/live/liveTraffic.ts`, `src/data/flights.ts` — live feeds, dead reckoning, phase classification, live event detection
 - `src/world/*` — Three.js scene, tiles, airport meshes, aircraft and vehicle models
 - `src/ui/*` — start screen, loading screen, cookie consent, HUD (strips, details, radio, FIDS), radar
-- `functions/api/[[path]].ts` — Cloudflare Pages Function proxy for the APIs above
+- `functions/api/[[path]].ts` — Cloudflare Pages Function: API proxy and the airport layout cache
 - `public/models/*` — 3D models; see the model credit files
 
 ## License and attribution

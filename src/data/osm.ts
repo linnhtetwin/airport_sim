@@ -1,6 +1,8 @@
 import { Projection, type XZ, type LatLon, headingOf, dist, pointInPolygon } from '../geo/projection';
 import { cacheGet, cacheSet } from './cache';
 import { syntheticAirport } from './synthetic';
+import { AIRPORTS } from './airports';
+import { LAYOUT_VERSION, LayoutNotFound, OVERPASS_MIRRORS, aerodromeCenter, isLayoutFile, layoutQuery, lookupQuery, usableElements } from './airportSource';
 
 // ---------- raw Overpass types ----------
 
@@ -84,14 +86,7 @@ export interface AirportLayout {
   synthetic: boolean;
 }
 
-// ---------- Overpass access ----------
-
-const MIRRORS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-];
+// ---------- layout download ----------
 
 /** Read a response body, reporting bytes as they arrive (for the loading screen). */
 async function readText(res: Response, onBytes?: (n: number) => void): Promise<string> {
@@ -112,21 +107,41 @@ async function readText(res: Response, onBytes?: (n: number) => void): Promise<s
   return new TextDecoder().decode(all);
 }
 
-async function overpass(query: string, onStatus: (s: string) => void, timeoutMs = 90_000, onBytes?: (n: number) => void): Promise<OsmElement[]> {
+/**
+ * A layout file from the game's own site: a prebuilt preset (public/airports) or the
+ * /api/airport endpoint (shared global cache). Null when it isn't there or can't be read.
+ */
+async function ownLayout(url: string, icao: string, waitMs: number, onBytes?: (n: number) => void): Promise<OsmElement[] | null> {
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), waitMs);
+    const res = await fetch(url, { signal: ctl.signal });
+    clearTimeout(timer);
+    // the API checked OpenStreetMap and found nothing usable: the public servers won't either
+    if (res.status === 404 && res.headers.get('X-Layout') === 'not-found') {
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new LayoutNotFound(body.error ?? `Airport ${icao} not found in OpenStreetMap`);
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const file: unknown = JSON.parse(await readText(res, onBytes)); // a missing static file may come back as index.html
+    return isLayoutFile(file, icao) ? file.elements : null;
+  } catch (e) {
+    if (e instanceof LayoutNotFound) throw e;
+    console.warn('Airport layout not available from', url, e);
+    return null;
+  }
+}
+
+/** Last resort: the public Overpass servers directly from the browser. */
+async function overpass(query: string, onStatus: (s: string) => void, timeoutMs: number, onBytes?: (n: number) => void): Promise<OsmElement[]> {
   let lastErr: unknown = null;
-  // First our own proxy (dev server or Pages Function: shared edge cache, no CORS/origin
-  // problems), then the public servers directly as a fallback.
-  const attempts = [
-    // the proxy itself tries several servers within 150 s, so give it a little longer
-    { host: 'OpenStreetMap', url: `/api/overpass/api/interpreter?data=${encodeURIComponent(query)}`, init: {} as RequestInit, wait: Math.max(timeoutMs, 160_000) },
-    ...MIRRORS.map((url) => ({ host: new URL(url).host, url, init: { method: 'POST', body: new URLSearchParams({ data: query }) } as RequestInit, wait: timeoutMs })),
-  ];
-  for (const { host, url, init, wait } of attempts) {
+  for (const url of OVERPASS_MIRRORS) {
+    const host = new URL(url).host;
     try {
-      onStatus(host === 'OpenStreetMap' ? 'Waiting for OpenStreetMap to prepare the map data…' : `Trying another OpenStreetMap server (${host})…`);
+      onStatus(`Trying OpenStreetMap server ${host}…`);
       const ctl = new AbortController();
-      const timer = setTimeout(() => ctl.abort(), wait);
-      const res = await fetch(url, { ...init, signal: ctl.signal });
+      const timer = setTimeout(() => ctl.abort(), timeoutMs);
+      const res = await fetch(url, { method: 'POST', body: new URLSearchParams({ data: query }), signal: ctl.signal });
       clearTimeout(timer);
       if (!res.ok) throw new Error(`${host}: HTTP ${res.status}`);
       const json = JSON.parse(await readText(res, onBytes)) as { elements: OsmElement[]; remark?: string };
@@ -140,52 +155,40 @@ async function overpass(query: string, onStatus: (s: string) => void, timeoutMs 
   throw lastErr ?? new Error('All Overpass mirrors failed');
 }
 
-const AEROWAY_WAYS = 'runway|taxiway|taxilane|apron|terminal|hangar|parking_position|stopway|jet_bridge|helipad|holding_position|tower|control_tower|gate';
-const AEROWAY_NODES = 'parking_position|gate|holding_position|tower|control_tower';
-
 export interface LoadOptions { icao: string; fallbackCenter?: LatLon; name?: string; iata?: string; onBytes?: (n: number) => void }
 
 export async function loadAirport(opts: LoadOptions, onStatus: (s: string) => void): Promise<AirportLayout> {
   const icao = opts.icao.toUpperCase();
-  const cacheKey = `osm:v3:${icao}`;
+  const cacheKey = `osm:v${LAYOUT_VERSION}:${icao}`;
   let elements = await cacheGet<OsmElement[]>(cacheKey, 1000 * 60 * 60 * 24 * 30);
-  let aerodrome: OsmElement | undefined;
 
   if (elements) {
     onStatus('Loaded airport layout from local cache');
   } else {
     try {
-      let c0 = opts.fallbackCenter;
-      if (!c0) {
-        // Unknown airport: a global tag search (slow on busy Overpass servers).
-        onStatus(`Looking up ${icao} in OpenStreetMap…`);
-        const head = await overpass(`[out:json][timeout:90];(nwr["aeroway"="aerodrome"]["icao"="${icao}"];);out center;`, onStatus, 100_000);
-        aerodrome = head[0];
-        const c = aerodrome?.center ?? (aerodrome?.lat != null ? { lat: aerodrome.lat, lon: aerodrome.lon! } : null);
-        if (!c) throw new Error(`Airport ${icao} not found in OpenStreetMap`);
-        c0 = c;
-        aerodrome = undefined;
+      // 1. preset airports ship with the game (scripts/update-airports.mjs)
+      if (AIRPORTS.some((a) => a.icao === icao)) {
+        onStatus('Loading the bundled airport layout…');
+        elements = await ownLayout(`/airports/${icao}.json`, icao, 30_000, opts.onBytes);
       }
-      // One bbox query around the airport centre gets the aerodrome outline plus everything on it.
-      const dLat = 0.05, dLon = 0.05 / Math.cos((c0.lat * Math.PI) / 180);
-      const bb = { s: c0.lat - dLat, w: c0.lon - dLon, n: c0.lat + dLat, e: c0.lon + dLon };
-      onStatus('Downloading runways, taxiways, aprons and buildings…');
-      const body = await overpass(
-        `[out:json][timeout:110][bbox:${bb.s},${bb.w},${bb.n},${bb.e}];` +
-          `nwr["aeroway"="aerodrome"]["icao"="${icao}"]->.ap;.ap map_to_area->.a;` +
-          `(.ap;way["aeroway"~"^(${AEROWAY_WAYS})$"];node["aeroway"~"^(${AEROWAY_NODES})$"];` +
-          `relation["aeroway"~"^(apron|terminal|hangar)$"];` +
-          // generic buildings only inside the aerodrome outline (cities around airports are huge)
-          `way(area.a)["building"];` +
-          `node["man_made"="tower"]["tower:type"="observation"];);out geom;`,
-        onStatus,
-        170_000,
-        opts.onBytes,
-      );
-      elements = aerodrome ? [aerodrome, ...body] : body;
-      // strip noisy navigation-aid lights etc. before caching
-      elements = elements.filter((e) => e.tags);
-      if (!elements.some((e) => e.tags?.aeroway === 'runway')) throw new Error('No runways mapped in OpenStreetMap');
+      // 2. the game's own API: one shared copy per airport for every player
+      //    (it may have to ask OpenStreetMap itself, within 150 s, so give it a little longer)
+      if (!elements) {
+        onStatus('Waiting for OpenStreetMap to prepare the map data…');
+        elements = await ownLayout(`/api/airport/${icao}`, icao, 160_000, opts.onBytes);
+      }
+      // 3. the public servers directly
+      if (!elements) {
+        let c0 = opts.fallbackCenter;
+        if (!c0) {
+          onStatus(`Looking up ${icao} in OpenStreetMap…`);
+          const c = aerodromeCenter((await overpass(lookupQuery(icao), onStatus, 100_000))[0]);
+          if (!c) throw new LayoutNotFound(`Airport ${icao} not found in OpenStreetMap`);
+          c0 = c;
+        }
+        onStatus('Downloading runways, taxiways, aprons and buildings…');
+        elements = usableElements(await overpass(layoutQuery(icao, c0), onStatus, 170_000, opts.onBytes));
+      }
       await cacheSet(cacheKey, elements);
     } catch (e) {
       console.warn('Falling back to a generated airport:', e);
