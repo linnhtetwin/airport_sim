@@ -92,6 +92,7 @@ export class TileGround {
     const style = this.style as Exclude<MapStyle, 'plain'>;
     this.total++;
     this.loader.load(TILE_URL[style](z, x, y), (tex) => {
+      if (this.disposed) { tex.dispose(); return; } // arrived after a map style switch
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.anisotropy = this.maxAniso;
       tex.generateMipmaps = true;
@@ -116,6 +117,14 @@ export class TileGround {
       this.waiters.push(resolve);
       setTimeout(resolve, timeoutMs);
     });
+  }
+
+  /** Free the tiles' textures and materials (switching map style builds a new ground). */
+  private disposed = false;
+  dispose() {
+    this.disposed = true;
+    for (const m of this.materials) { m.map?.dispose(); m.dispose(); }
+    this.group.traverse((o) => { if (o instanceof THREE.Mesh) o.geometry.dispose(); });
   }
 
   private dim = 0xffffff;

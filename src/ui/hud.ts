@@ -25,7 +25,7 @@ const mmss = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec %
 const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 
 const GROUPS: { key: string; title: string; phases: Phase[] }[] = [
-  { key: 'twr', title: 'Tower · runway & final', phases: ['APPROACH', 'GO_AROUND', 'ROLLOUT', 'HOLD_SHORT', 'LINEUP', 'LINED_UP', 'TAKEOFF', 'CLIMB'] },
+  { key: 'twr', title: 'Tower · runway & final', phases: ['APPROACH', 'HOVER', 'GO_AROUND', 'ROLLOUT', 'HOLD_SHORT', 'PAD_READY', 'LINEUP', 'LINED_UP', 'TAKEOFF', 'LIFTOFF', 'CLIMB'] },
   { key: 'gnd', title: 'Ground · taxiways', phases: ['VACATED', 'TAXI_IN', 'PUSH_WAIT', 'PUSHBACK', 'PUSHED', 'TAXI_OUT'] },
   { key: 'ramp', title: 'Ramp · stands & services', phases: ['AT_STAND', 'DOCKING', 'PARKED', 'READY'] },
 ];
@@ -140,7 +140,7 @@ export class Hud {
       if (act === 'fids') this.showFids();
       else if (act === 'settings') this.showSettings();
       else if (act === 'menu') { if (confirm('Leave this airport and pick another?')) location.href = location.pathname; }
-      else if (act === 'speech') { g.radio.setSpeech(!g.radio.speech); this.refreshTopbar(); }
+      else if (act === 'speech') { g.radio.setSpeech(!g.radio.speech); lsSet('aos:speech', g.radio.speech ? '1' : '0'); this.refreshTopbar(); }
       else if (act === 'close') this.el.modal.classList.add('hidden');
       else if (act === 'clean') this.toggleClean();
       const min = t.closest<HTMLElement>('[data-min]')?.dataset.min;
@@ -298,7 +298,7 @@ export class Hud {
     let st: string = PHASE_LABEL[ac.phase];
     if (ac.phase === 'APPROACH') st = `${(ac.finalDist / NM).toFixed(1)} nm final${ac.clearedLand ? ' · cleared' : ''}`;
     if (ac.heldByAtc) st = 'Holding position';
-    const pos = ac.kind === 'ARR' || ['PARKED', 'READY', 'AT_STAND', 'DOCKING', 'PUSH_WAIT', 'PUSHBACK'].includes(ac.phase) ? (ac.stand?.ref ?? '—') : (ac.rwy?.name ?? sim.depEnd.name);
+    const pos = ac.kind === 'ARR' || ['PARKED', 'READY', 'AT_STAND', 'DOCKING', 'PUSH_WAIT', 'PUSHBACK', 'PAD_READY', 'HOVER'].includes(ac.phase) ? (ac.standRef || '—') : (ac.rwy?.name ?? sim.depEnd.name);
     const cls = ['strip', ac.kind.toLowerCase(), ac.id === this.g.selectedId ? 'selected' : '', req && !req.passive ? 'attention' : '', ac.emergency ? 'emergency' : ''].join(' ');
     return `<div class="${cls}" data-id="${ac.id}">
       <div class="s-l"><b>${esc(ac.callsign)}</b><small>${ac.spec.code} · ${ac.kind === 'ARR' ? esc(ac.origin) + '→' : '→' + esc(ac.dest)}</small></div>
@@ -399,7 +399,7 @@ export class Hud {
         btn('goaround', 'Go around', ac.phase === 'APPROACH', false, undefined, true),
         btn('cross', `Cross RWY${crossPending ? ' ' + esc(hold!.runway.ref) : ''}`, crossPending && moving, rk === 'cross'),
         btn('lineup', 'Line up & wait', ac.phase === 'HOLD_SHORT', rk === 'lineup'),
-        btn('takeoff', 'Cleared for takeoff', ['HOLD_SHORT', 'LINED_UP'].includes(ac.phase) || (ac.phase === 'LINEUP' && !ac.takeoffCleared), rk === 'takeoff'),
+        btn('takeoff', 'Cleared for takeoff', ['HOLD_SHORT', 'LINED_UP', 'PAD_READY'].includes(ac.phase) || (ac.phase === 'LINEUP' && !ac.takeoffCleared), rk === 'takeoff'),
         ac.emergency ? btn('fire', '🚒 Alert fire services', !ac.fireAlerted, rk === 'fire', undefined, true) : '',
       ].join('');
       const groundActions = [
@@ -438,7 +438,7 @@ export class Hud {
         <div><small>ALT</small><b>${ac.alt > 2 ? Math.round(ac.alt / FT / 10) * 10 + ' ft' : 'GND'}</b></div>
         <div><small>SPEED</small><b>${Math.round(ac.speed / KT)} kt</b></div>
         <div><small>HDG</small><b>${String(Math.round(ac.heading) || 360).padStart(3, '0')}°</b></div>
-        <div><small>${ac.phase === 'APPROACH' ? 'FINAL' : 'STAND'}</small><b>${ac.phase === 'APPROACH' ? (ac.finalDist / NM).toFixed(1) + ' nm' : esc(ac.stand?.ref ?? '—')}</b></div>
+        <div><small>${ac.phase === 'APPROACH' ? 'FINAL' : 'STAND'}</small><b>${ac.phase === 'APPROACH' ? (ac.finalDist / NM).toFixed(1) + ' nm' : esc(ac.standRef || '—')}</b></div>
         <div><small>RWY</small><b>${esc(ac.rwy?.name ?? '—')}</b></div>
         <div><small>DELAY</small><b class="${ac.delay > 0 ? 'late' : ''}">${mmss(ac.delay)}</b></div>${turn}`;
     }
@@ -655,7 +655,7 @@ export class Hud {
         else if (a.phase === 'TAKEOFF') { remark = 'TAKING OFF'; lamp = 'blue'; }
         else { remark = 'TAXIING'; lamp = 'blue'; }
         if (g.sim.time > a.std + 60 && (a.dormant || a.phase === 'PARKED' || a.phase === 'READY')) { remark = 'DELAYED'; lamp = 'amber'; }
-        return { k: a.std, cells: [at(a.std), a.callsign, cityOf(a.dest), a.stand?.ref ?? a.gateRef, remark], lamp };
+        return { k: a.std, cells: [at(a.std), a.callsign, cityOf(a.dest), a.standRef || a.gateRef, remark], lamp };
       });
     return [...done, ...upcoming].sort((a, b) => a.k - b.k).slice(0, 12);
   }
@@ -698,7 +698,7 @@ export class Hud {
         remark = `LANDED ${at(t)}`;
       }
       if (a.emergency && a.phase === 'APPROACH') { remark = 'EMERGENCY'; lamp = 'red'; }
-      rows.push({ k: t, cells: [at(t), a.callsign, cityOf(a.origin), a.stand?.ref ?? '', remark], lamp });
+      rows.push({ k: t, cells: [at(t), a.callsign, cityOf(a.origin), a.standRef, remark], lamp });
     }
     for (const p of g.sim.upcomingArrivals()) {
       rows.push({ k: p.eta, cells: [at(p.eta), p.callsign, cityOf(p.origin), '', 'EXPECTED'], lamp: '' });
@@ -804,10 +804,12 @@ export class Hud {
     (box.querySelector('[data-set="map"]') as HTMLSelectElement).value = g.cfg.mapStyle;
     box.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-set]').forEach((inp) => inp.addEventListener('change', () => {
       const k = inp.dataset.set!;
-      if (k === 'autoTower' || k === 'autoGround' || k === 'autoRamp') o[k] = (inp as HTMLInputElement).checked;
-      else if (k === 'difficulty') o.difficulty = inp.value as typeof o.difficulty;
-      else if (k === 'map') g.setMapStyle(inp.value as MapStyle);
-      else if (k === 'speech') g.radio.setSpeech((inp as HTMLInputElement).checked);
+      const on = (inp as HTMLInputElement).checked;
+      // saved under the start screen's keys, so they also apply next time (and to direct links)
+      if (k === 'autoTower' || k === 'autoGround' || k === 'autoRamp') { o[k] = on; lsSet(`aos:${k}`, on ? '1' : '0'); }
+      else if (k === 'difficulty') { o.difficulty = inp.value as typeof o.difficulty; lsSet('aos:difficulty', inp.value); }
+      else if (k === 'map') { g.setMapStyle(inp.value as MapStyle); lsSet('aos:map', inp.value); }
+      else if (k === 'speech') { g.radio.setSpeech(on); lsSet('aos:speech', on ? '1' : '0'); }
       this.refreshTopbar();
     }));
   }

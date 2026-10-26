@@ -16,17 +16,24 @@ https://github.com/srcejon/sdrangel-3d-models/blob/main/LICENSE
 E190.glb also stands in for the closely related E170, E175, E195, and E195-E2
 aircraft, fitted to each type's length and wingspan where applicable.
 
-Bombardier CRJ900 (CRJ9.glb) and Cessna 172 (C172.glb) neutral models: Bluebell
-CSL contributors, converted to glTF by SDRangel, with the airline textures
-replaced by one neutral material for Airport Ops Sim. Geometry is released
-under CC0 1.0:
+Bombardier CRJ900 (CRJ9.glb), Dash 8 Q400 (DH8D.glb), Boeing 747-400 (B744.glb)
+and Cessna 172 (C172.glb) neutral models: Bluebell CSL contributors, converted to glTF by SDRangel, with
+the airline textures replaced by one neutral material for Airport Ops Sim and
+the spinning-propeller blur discs removed. Geometry is released under CC0 1.0:
 https://creativecommons.org/publicdomain/zero/1.0/
 https://github.com/srcejon/sdrangel-3d-models/tree/59d1ee24ebc2c24343afb54b26928f965a625140/BB_Jets_png/CRJ9
+https://github.com/srcejon/sdrangel-3d-models/tree/59d1ee24ebc2c24343afb54b26928f965a625140/BB_Props_png/DH8D
 https://github.com/srcejon/sdrangel-3d-models/tree/59d1ee24ebc2c24343afb54b26928f965a625140/BB_GA_png/C172
+https://github.com/srcejon/sdrangel-3d-models/tree/59d1ee24ebc2c24343afb54b26928f965a625140/BB_Boeing_png/B744
 
-CRJ9.glb also stands in for the CRJ100/200, CRJ700 and CRJ1000, fitted to each
-type's length and wingspan. C172.glb stands in for other light aircraft, such
-as the Piper PA-28.
+CRJ9.glb also stands in for the CRJ100/200, CRJ700 and CRJ1000, and DH8D.glb
+for the Dash 8-100, -200 and -300, each fitted to its type's length and
+wingspan. B744.glb is used for every 747, stretched to the longer 747-8 (no free
+747-8 model exists). C172.glb stands in for other light aircraft, such as the
+Piper PA-28.
+
+The game paints airline liveries (tail, cheatline, belly) on these neutral
+models at run time; the files themselves stay plain.
 
 Bell 206 JetRanger (B06.glb) neutral model: Bluebell CSL contributors, CC0 1.0,
 converted from the X-Plane OBJ8 model to glTF for Airport Ops Sim (parked pose:

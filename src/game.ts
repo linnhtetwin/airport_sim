@@ -15,6 +15,7 @@ import { buildAirportScene, type AirportScene } from './world/airportMeshes';
 import { TileGround, type MapStyle } from './world/ground';
 import { World } from './world/scene';
 import { TrafficView, VehicleView, MarshallerView, type AcRender } from './world/traffic';
+import { preloadModels } from './world/models';
 import { Hud } from './ui/hud';
 import type { LoadingScreen } from './ui/loading';
 
@@ -88,6 +89,8 @@ export class Game {
 
     progress.stage('scene', `${this.graph.stands.length} stands, ${this.layout.polys.length} buildings`);
     await tick();
+    // aircraft and vehicle models first, so nothing shows up as a placeholder block
+    const models = preloadModels();
     this.world = new World(this.viewport);
     this.ground = new TileGround(this.layout, this.cfg.mapStyle, this.world.renderer.capabilities.getMaxAnisotropy());
     this.airport = buildAirportScene(this.layout, this.graph);
@@ -99,6 +102,8 @@ export class Game {
     this.ground.onProgress = (done, total) => { progress.fraction(done / total); progress.detail(`${done} / ${total} map tiles`); };
     await this.ground.ready(12_000);
     this.ground.onProgress = () => {}; // late tiles keep loading quietly
+    progress.detail('Aircraft models…');
+    await models;
 
     progress.stage('weather', this.layout.icao);
     this.metar = await fetchMetar(this.layout.icao);
@@ -180,6 +185,7 @@ export class Game {
   setMapStyle(style: MapStyle) {
     this.cfg.mapStyle = style;
     this.world.scene.remove(this.ground.group);
+    this.ground.dispose();
     this.ground = new TileGround(this.layout, style, this.world.renderer.capabilities.getMaxAnisotropy());
     this.ground.setNight(this.world.night);
     this.world.scene.add(this.ground.group);
@@ -306,7 +312,8 @@ export class Game {
       out.push({
         id: ac.id,
         type: ac.spec.code,
-        airline: ac.airline,
+        // helicopters have no airline: colour them by registration instead
+        airline: ac.airline ?? (ac.heli ? ac.callsign : null),
         x: ac.pos.x, y: alt, z: ac.pos.z,
         heading: ac.heading,
         pitch: ac.pitch,

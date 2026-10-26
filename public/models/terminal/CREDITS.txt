@@ -1,0 +1,9 @@
+Jet bridge model (jet-bridge.glb) from 3DAssets.dev, "Airport Terminal and
+Ground Operations" pack:
+https://3dassets.dev/packs/airport-terminal-and-ground-operations
+
+Dedicated to the public domain under CC0 1.0 Universal.
+License: https://creativecommons.org/publicdomain/zero/1.0/
+
+Used unchanged; the game places one per mapped jet bridge, stretched along its
+length to fit.

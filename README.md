@@ -6,7 +6,8 @@ Run the **tower, ground and ramp** of a real airport, built in 3D from OpenStree
 
 - **ATC Simulation** — clear landings and takeoffs, approve runway crossings, taxi aircraft to stands and runways, send marshallers, dispatch fuel / catering / baggage / cleaning trucks, pushback tugs, follow-me cars and fire tenders. Real airlines currently operating at the airport fill the schedule, and with FlightAware the airport runs today's real timetable.
 - **Live Watch** — every real aircraft around the airport in 3D, with callsign, airline, type, registration, route, altitude, speed, vertical rate, squawk, heading and flight phase, plus a live log of real landings, departures, approaches and emergency squawks.
-- **3D models** — glTF airliners (A320, B737, B757, B767, B787, A350, A380, E-Jets, CRJs) tinted in airline colours, a Cessna 172 for light aircraft, a Bell JetRanger for helicopters, and real ground-service vehicles.
+- **3D models** — glTF airliners (A320, B737, B747, B757, B767, B787, A350, A380, E-Jets, CRJs, Dash 8 Q400) in airline colours, a Cessna 172 for light aircraft, a Bell JetRanger for helicopters, real ground-service vehicles and jet bridges. Terminals, hangars and other buildings are built on their real OpenStreetMap footprints with glazed, clad or windowed facades that light up at night.
+- **Helicopters** — where the airport has a helipad, local helicopter flights land and take off vertically from it, separate from the runways.
 - **Real local time** — clocks, logs and the split-flap FIDS board use the airport's own time zone.
 
 ## Run it
@@ -56,6 +57,7 @@ Aircraft ask for clearances on the radio and in the flight strips (yellow = wait
 2. **Ground:** *Taxi to stand* (or pick another stand first), *Follow-me car*, *Approve pushback*, *Taxi to runway*, *Hold position*.
 3. **Ramp:** *Send marshaller* when the aircraft reaches its stand, then dispatch turnaround services. When the turnaround is done the aircraft becomes a departure and asks for pushback.
 4. **Emergencies:** a MAYDAY call (squawk 7700) means *Alert fire services* before it lands.
+5. **Helicopters:** they call Tower inbound to a helipad. *Cleared to land* lets them descend to a hover over the pad and set down; without it they hover and hold short of the pad. When ready, *Cleared for takeoff* lifts them vertically off the pad into the wind. No runway, taxi or pushback involved.
 
 Scoring: +100 per arrival on blocks and per departure, +10 per completed service. −50 for a go-around without clearance, −150 for clearing a landing onto an occupied runway, −250 for a runway incursion, plus a slow drain while aircraft wait more than a minute for you. In *Settings* you can hand Tower, Ground or Ramp to the computer and run just one position yourself.
 
@@ -147,9 +149,9 @@ under the [Open Database License](https://www.openstreetmap.org/copyright).
 3D models are not covered by the MIT License either:
 
 - A320, A350, A380, B737 and B787 airliners: [amvlab](https://github.com/amvlab/aircraft-models), [CC BY 4.0](./public/models/LICENSE-CC-BY-4.0.txt).
-- B757, B767, E190 and CRJ900 airliners, the Cessna 172 and the Bell 206 helicopter: [Bluebell CSL](https://github.com/oktal3700/bluebell) contributors (via SDRangel and Clear Aviation Tracking for most), CC0 1.0.
-- Ground-service vehicles: [3DAssets.dev](https://3dassets.dev/packs/airport-terminal-and-ground-operations), CC0 1.0.
+- B747-400, B757, B767, E190, CRJ900 and Dash 8 Q400 airliners, the Cessna 172 and the Bell 206 helicopter: [Bluebell CSL](https://github.com/oktal3700/bluebell) contributors (via SDRangel and Clear Aviation Tracking for most), CC0 1.0.
+- Ground-service vehicles and jet bridges: [3DAssets.dev](https://3dassets.dev/packs/airport-terminal-and-ground-operations), CC0 1.0.
 
-Full credits are in [`public/models/CREDITS.txt`](./public/models/CREDITS.txt) and [`public/models/vehicles/CREDITS.txt`](./public/models/vehicles/CREDITS.txt).
+Full credits are in [`public/models/CREDITS.txt`](./public/models/CREDITS.txt), [`public/models/vehicles/CREDITS.txt`](./public/models/vehicles/CREDITS.txt) and [`public/models/terminal/CREDITS.txt`](./public/models/terminal/CREDITS.txt).
 
 This is a game. Don't use it for real-world navigation or ATC.

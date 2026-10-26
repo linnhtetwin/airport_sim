@@ -58,6 +58,8 @@ export interface PolyFeature {
   height: number;
   minHeight: number;
   name?: string;
+  /** The map's own label, e.g. a helipad's "H1". */
+  ref?: string;
 }
 
 export interface StandRaw {
@@ -437,7 +439,7 @@ function poly(kind: PolyKind, outer: XZ[], holes: XZ[][], t: Record<string, stri
   const defaults: Record<PolyKind, number> = { apron: 0, helipad: 0, terminal: 18, hangar: 22, building: 9 };
   const height = num(t.height) ?? (levels != null ? levels * 3.6 + 2 : defaults[kind]);
   const minHeight = num(t.min_height) ?? 0;
-  return { kind, outer, holes, height: Math.max(3, Math.min(height, 120)), minHeight, name: t.name };
+  return { kind, outer, holes, height: Math.max(3, Math.min(height, 120)), minHeight, name: t.name, ref: t.ref };
 }
 
 function makeRunway(id: string, ref: string, width: number, pts: XZ[], nodeIds: number[]): Runway | null {

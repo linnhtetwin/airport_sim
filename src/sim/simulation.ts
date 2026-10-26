@@ -1,8 +1,8 @@
-import { type XZ, KT, dist, headingVec, angleDiff, headingOf } from '../geo/projection';
+import { type XZ, KT, dist, headingVec, angleDiff, headingOf, pointInPolygon } from '../geo/projection';
 import type { AirportLayout, Runway, RunwayEnd } from '../data/osm';
 import { type TypeSpec, TYPES, SIM_TYPE_POOL, typeSpec } from '../data/aircraftTypes';
 import { telephony, airlineOf } from '../data/airlines';
-import type { VehicleKind } from '../world/models';
+import { type VehicleKind, hasAircraftModel } from '../world/models';
 import type { FaFlight } from '../data/flightaware';
 import { Path } from './path';
 import { Radio, type Speaker } from './radio';
@@ -12,7 +12,9 @@ import { Fleet, type Vehicle } from './vehicles';
 export type Phase =
   | 'APPROACH' | 'GO_AROUND' | 'ROLLOUT' | 'VACATED' | 'TAXI_IN' | 'AT_STAND' | 'DOCKING' | 'PARKED'
   | 'READY' | 'PUSH_WAIT' | 'PUSHBACK' | 'PUSHED' | 'TAXI_OUT' | 'HOLD_SHORT' | 'LINEUP' | 'LINED_UP'
-  | 'TAKEOFF' | 'CLIMB' | 'GONE';
+  | 'TAKEOFF' | 'CLIMB' | 'GONE'
+  // helicopters: hover and vertical landing on a helipad, ready on the pad, vertical lift-off
+  | 'HOVER' | 'PAD_READY' | 'LIFTOFF';
 
 export type ServiceKind = 'baggage' | 'catering' | 'cleaning' | 'fuel';
 export const SERVICE_KINDS: ServiceKind[] = ['baggage', 'catering', 'cleaning', 'fuel'];
@@ -25,12 +27,34 @@ export const PHASE_LABEL: Record<Phase, string> = {
   READY: 'Ready for pushback', PUSH_WAIT: 'Waiting for tug', PUSHBACK: 'Pushing back', PUSHED: 'Ready to taxi',
   TAXI_OUT: 'Taxiing to runway', HOLD_SHORT: 'Holding short', LINEUP: 'Lining up', LINED_UP: 'Lined up',
   TAKEOFF: 'Takeoff roll', CLIMB: 'Departing', GONE: 'Gone',
+  HOVER: 'Hovering to land', PAD_READY: 'Ready for departure', LIFTOFF: 'Lifting off',
 };
+
+/** A helicopter landing pad on the airport. */
+export interface HeliPad { ref: string; p: XZ; occupant: string | null }
+
+/** Helicopter registrations by ICAO region (callsign = registration without the dash). */
+const HELI_REG: [RegExp, string][] = [
+  [/^K/, 'N###LL'], [/^EG/, 'GLLLL'], [/^LF/, 'FLLLL'], [/^ED/, 'DHLLL'], [/^EH/, 'PHLLL'], [/^RJ/, 'JA####'],
+  [/^VH/, 'BHLL'], [/^OM/, 'A6LLL'], [/^WS/, '9VLLL'], [/^VT/, 'HSLLL'], [/^VY/, 'XYLLL'], [/^RK/, 'HL####'], [/^Y/, 'VHLLL'],
+];
 
 /** Stop point before entering a runway; `sOut` is where the path leaves the runway area again. */
 interface Hold { s: number; sOut: number; runway: Runway; kind: 'cross' | 'depart' | 'vacate'; cleared: boolean }
 
 const DESTS = ['LHR', 'CDG', 'FRA', 'AMS', 'DXB', 'DOH', 'SIN', 'HKG', 'NRT', 'HND', 'ICN', 'PEK', 'PVG', 'BKK', 'KUL', 'SYD', 'LAX', 'SFO', 'JFK', 'ORD', 'ATL', 'DFW', 'MIA', 'YYZ', 'MEX', 'GRU', 'IST', 'MAD', 'FCO', 'ZRH', 'MUC', 'DEL', 'BOM', 'CGK', 'MNL', 'TPE', 'RGN', 'SGN', 'HAN', 'AKL', 'MEL', 'SEA', 'BOS', 'IAD', 'LAS', 'DEN', 'CPH', 'HEL', 'DUB', 'LIS', 'VIE', 'BRU', 'CAI', 'JNB', 'NBO', 'ADD', 'HKT', 'MDL'];
+
+/**
+ * ATC Sim only flies types that have a 3D model, so no procedural blocks: a type without
+ * one (from live traffic or a real schedule) becomes the closest type that has one.
+ */
+function simSpec(spec: TypeSpec): TypeSpec {
+  if (hasAircraftModel(spec)) return spec;
+  const near = /^A34/.test(spec.code) ? TYPES.A333
+    : spec.size === 'jumbo' ? TYPES.B744 : spec.size === 'wide' ? TYPES.B789
+    : spec.size === 'regional' ? TYPES.E190 : spec.size === 'light' ? TYPES.C172 : spec.size === 'heli' ? TYPES.B407 : TYPES.A320;
+  return hasAircraftModel(near) ? near : TYPES.A320;
+}
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const pick = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
@@ -86,6 +110,8 @@ export class SimAircraft {
   followMeId: string | null = null;
   said = new Set<string>();
   cleanupAt = 0;
+  /** Helipad a helicopter is using (helicopters never use stands). */
+  pad: HeliPad | null = null;
 
   constructor(public callsign: string, public spec: TypeSpec, public kind: 'ARR' | 'DEP', public origin: string, public dest: string) {
     this.squawk = String(Math.floor(rand(1000, 7000))).replace(/[89]/g, '4');
@@ -94,6 +120,9 @@ export class SimAircraft {
   get tel() { return telephony(this.callsign); }
   get onGround() { return this.alt < 1; }
   get isActive() { return !this.dormant && this.phase !== 'GONE'; }
+  get heli() { return this.spec.size === 'heli'; }
+  /** Stand or helipad, for strips and boards. */
+  get standRef() { return this.stand?.ref ?? this.pad?.ref ?? ''; }
 }
 
 export interface SimOptions {
@@ -139,6 +168,9 @@ export class Simulation {
   private incidentKeys = new Set<string>();
   incidents: { t: number; rw: string; a: string; b: string }[] = [];
   private autoTimers = new Map<string, number>();
+  /** Helipads inside the airport boundary; without any there is no helicopter traffic. */
+  pads: HeliPad[] = [];
+  private heliTimer = 300;
 
   constructor(public layout: AirportLayout, public graph: TaxiGraph, public radio: Radio, public opts: SimOptions) {
     // fleet grows with the size of the ramp
@@ -150,6 +182,13 @@ export class Simulation {
     const ends = layout.runways.flatMap((r) => r.ends);
     this.arrEnd = ends[0];
     this.depEnd = ends[0];
+    // (the download box also holds city and hospital helipads: keep the airport's own)
+    const onAirport = (p: XZ) => (layout.boundary ? pointInPolygon(p, layout.boundary) : Math.hypot(p.x, p.z) < 3000);
+    this.pads = layout.polys
+      .filter((p) => p.kind === 'helipad')
+      .map((p) => ({ ref: p.ref ?? '', p: { x: p.outer.reduce((s, q) => s + q.x, 0) / p.outer.length, z: p.outer.reduce((s, q) => s + q.z, 0) / p.outer.length } }))
+      .filter((h) => onAirport(h.p))
+      .map((h, i) => ({ ref: h.ref && h.ref.length <= 4 ? h.ref : `H${i + 1}`, p: h.p, occupant: null }));
   }
 
   // ---------------- setup ----------------
@@ -205,6 +244,15 @@ export class Simulation {
         ac.std = this.time + (i === 1 ? 600 : 900);
       }
     });
+    // a helicopter waiting on a pad for a later local flight
+    const pad = this.freePad();
+    if (pad) {
+      const h = new SimAircraft(this.heliCallsign(), TYPES.B407, 'DEP', this.opts.iata, 'LCL');
+      this.parkOnPad(h, pad);
+      h.dormant = true;
+      h.std = this.time + rand(900, 2400);
+      this.aircraft.push(h);
+    }
     this.spawnArrival(9000);
     this.arrTimer = DIFF[this.opts.difficulty].arr * 0.6;
     this.radio.say('SYS', `${this.layout.name}: ${this.graph.stands.length} stands, ${this.layout.runways.length} runways. Arrivals ${this.arrEnd.name}, departures ${this.depEnd.name}. Wind ${this.windText()}.`);
@@ -212,10 +260,41 @@ export class Simulation {
 
   private typeFor(maxSpan: number): TypeSpec | null {
     for (let i = 0; i < 12; i++) {
-      const t = TYPES[weighted(SIM_TYPE_POOL)];
+      const t = simSpec(TYPES[weighted(SIM_TYPE_POOL)]);
       if (t.span <= maxSpan + 2) return t;
     }
     return maxSpan >= 36 ? TYPES.A320 : maxSpan >= 29 ? TYPES.E190 : null;
+  }
+
+  /** A registration-style callsign in the airport country's format. */
+  private heliCallsign(): string {
+    const fmt = HELI_REG.find(([re]) => re.test(this.layout.icao))?.[1] ?? 'N###LL';
+    for (let i = 0; i < 50; i++) {
+      const cs = fmt.replace(/#/g, () => String(Math.floor(Math.random() * 10))).replace(/L/g, () => String.fromCharCode(65 + Math.floor(Math.random() * 26)));
+      if (!this.aircraft.some((a) => a.callsign === cs)) return cs;
+    }
+    return `HELI${nextId}`;
+  }
+
+  private freePad(): HeliPad | null {
+    const free = this.pads.filter((p) => !p.occupant);
+    return free.length ? pick(free) : null;
+  }
+
+  /** Helicopters land and take off into the wind (away from the airport when it's calm). */
+  private heliHeading(pad: HeliPad): number {
+    return this.wind.speed >= 3 ? this.wind.dir : headingOf({ x: 0, z: 0 }, pad.p);
+  }
+
+  private parkOnPad(ac: SimAircraft, pad: HeliPad) {
+    ac.pad = pad;
+    pad.occupant = ac.id;
+    ac.pos = { ...pad.p };
+    ac.heading = this.heliHeading(pad);
+    ac.phase = 'PARKED';
+    ac.alt = 0;
+    ac.speed = 0;
+    ac.path = null;
   }
 
   private newCallsign(): string {
@@ -279,11 +358,16 @@ export class Simulation {
         continue;
       }
       const seed = this.seedFlights.find((f) => !this.aircraft.some((a) => a.callsign === f.callsign) && !this.planned.some((p) => p.callsign === f.callsign));
+      // light aircraft and helicopters don't fly airliner arrivals to terminal stands
+      if (seed && ['heli', 'light'].includes(typeSpec(seed.type).size)) {
+        this.seedFlights.splice(this.seedFlights.indexOf(seed), 1);
+        continue;
+      }
       if (seed && Math.random() < 0.7) {
         this.seedFlights.splice(this.seedFlights.indexOf(seed), 1);
-        this.planned.push({ callsign: seed.callsign, spec: typeSpec(seed.type), origin: pick(DESTS.filter((d) => d !== this.opts.iata)) });
+        this.planned.push({ callsign: seed.callsign, spec: simSpec(typeSpec(seed.type)), origin: pick(DESTS.filter((d) => d !== this.opts.iata)) });
       } else {
-        this.planned.push({ callsign: this.newCallsign(), spec: TYPES[weighted(SIM_TYPE_POOL)], origin: pick(DESTS.filter((d) => d !== this.opts.iata)) });
+        this.planned.push({ callsign: this.newCallsign(), spec: simSpec(TYPES[weighted(SIM_TYPE_POOL)]), origin: pick(DESTS.filter((d) => d !== this.opts.iata)) });
       }
     }
   }
@@ -302,7 +386,9 @@ export class Simulation {
       .filter((f) => f.kind === 'ARR' && usable(f) && !f.aOn && (f.eIn ?? f.sIn ?? 0) > nowMs)
       .sort((a, b) => (a.eIn ?? a.sIn ?? 0) - (b.eIn ?? b.sIn ?? 0));
     if (arrivals.length) {
-      this.realArrivals = arrivals.map((f) => ({ callsign: callsign(f), spec: typeSpec(f.aircraftType), origin: elsewhere(f.origin) }));
+      this.realArrivals = arrivals
+        .map((f) => ({ callsign: callsign(f), spec: simSpec(typeSpec(f.aircraftType)), origin: elsewhere(f.origin) }))
+        .filter((f) => f.spec.size !== 'heli' && f.spec.size !== 'light');
       this.planned = [];
       this.fillPlan();
     }
@@ -316,10 +402,10 @@ export class Simulation {
       if (!dormant.length) break;
       const cs = callsign(f);
       if (this.aircraft.some((a) => a.callsign === cs)) continue;
-      const spec = typeSpec(f.aircraftType);
+      const spec = simSpec(typeSpec(f.aircraftType));
       const atGate = f.gateOrigin ? dormant.find((a) => a.stand!.ref.toUpperCase() === f.gateOrigin!.toUpperCase()) : undefined;
       const ac = atGate ?? dormant.find((a) => a.stand!.maxSpan + 2 >= spec.span) ?? dormant[0];
-      if (ac.stand!.maxSpan + 2 >= spec.span) ac.spec = spec;
+      if (ac.stand!.maxSpan + 2 >= spec.span && spec.size !== 'heli' && spec.size !== 'light') ac.spec = spec;
       ac.callsign = cs;
       ac.dest = elsewhere(f.dest);
       ac.std = this.time + ((f.eOut ?? f.sOut)! - nowMs) / 1000;
@@ -379,6 +465,24 @@ export class Simulation {
     return true;
   }
 
+  /** A local helicopter flight inbound to a free helipad, flying the last miles into the wind. */
+  private spawnHeliArrival(): boolean {
+    const pad = this.freePad();
+    if (!pad) return false;
+    const ac = new SimAircraft(this.heliCallsign(), TYPES.B407, 'ARR', 'LCL', this.opts.iata);
+    ac.pad = pad;
+    pad.occupant = ac.id;
+    ac.phase = 'APPROACH';
+    ac.heading = this.heliHeading(pad);
+    ac.finalDist = 4500;
+    ac.speed = 90 * KT;
+    this.aircraft.push(ac);
+    this.updateHeliApproach(ac, 0);
+    const from = compass(headingOf(pad.p, ac.pos));
+    this.say('PILOT', `${this.opts.radioName} Tower, ${ac.tel}, helicopter, ${Math.round(ac.finalDist / 1852)} miles ${from} of the field, inbound to land helipad ${pad.ref}`, ac);
+    return true;
+  }
+
   private canSpawnArrival(): boolean {
     const app = this.aircraft.filter((a) => a.phase === 'APPROACH');
     if (app.length >= DIFF[this.opts.difficulty].maxApp) return false;
@@ -403,6 +507,12 @@ export class Simulation {
       if (this.spawnArrival()) this.arrTimer = DIFF[this.opts.difficulty].arr * rand(0.7, 1.3);
       else this.arrTimer = 20;
     }
+    // now and then a local helicopter flight, if the airport has a helipad
+    this.heliTimer -= dt;
+    if (this.heliTimer <= 0) {
+      this.heliTimer = rand(600, 1200);
+      if (!this.aircraft.some((a) => a.heli && a.isActive && a.kind === 'ARR')) this.spawnHeliArrival();
+    }
     if (this.depTimer <= 0) {
       const dormant = this.aircraft.filter((a) => a.dormant);
       if (dormant.length) {
@@ -410,8 +520,16 @@ export class Simulation {
         const ac = dormant.reduce((a, b) => (b.std < a.std ? b : a));
         ac.dormant = false;
         if (!(ac.std > this.time + 300 && ac.std < this.time + 3600)) ac.std = this.time + 420;
-        this.beginTurnaround(ac, 2 + Math.floor(Math.random() * 3));
-        this.say('RAMP', `${ac.callsign} at stand ${ac.stand?.ref} scheduled for departure to ${ac.dest}, turnaround services required`, ac, 'RAMP');
+        if (ac.heli) {
+          // no ground handling on a helipad, at most a fuel truck
+          this.beginTurnaround(ac, 0);
+          if (Math.random() < 0.5) ac.services.fuel = 'todo';
+          ac.minTurn = 120;
+          this.say('RAMP', `${ac.callsign} on helipad ${ac.pad?.ref} preparing for a local flight${ac.services.fuel === 'todo' ? ', fuel requested' : ''}`, ac, 'RAMP');
+        } else {
+          this.beginTurnaround(ac, 2 + Math.floor(Math.random() * 3));
+          this.say('RAMP', `${ac.callsign} at stand ${ac.stand?.ref} scheduled for departure to ${ac.dest}, turnaround services required`, ac, 'RAMP');
+        }
       }
       this.depTimer = DIFF[this.opts.difficulty].dep * rand(0.7, 1.3);
     }
@@ -439,7 +557,9 @@ export class Simulation {
 
   private step(ac: SimAircraft, dt: number) {
     switch (ac.phase) {
-      case 'APPROACH': return this.updateApproach(ac, dt);
+      case 'APPROACH': return ac.heli ? this.updateHeliApproach(ac, dt) : this.updateApproach(ac, dt);
+      case 'HOVER': return this.updateHover(ac, dt);
+      case 'LIFTOFF': return this.updateLiftoff(ac, dt);
       case 'GO_AROUND': return this.updateGoAround(ac, dt);
       case 'ROLLOUT': return this.updateRollout(ac, dt);
       case 'TAXI_IN':
@@ -512,8 +632,89 @@ export class Simulation {
     }
   }
 
+  /**
+   * Helicopter approach: straight to the pad into the wind on a steep (7 degree) glide path,
+   * slowing from 90 kt to a hover over the pad. Without a landing clearance it stops and
+   * holds in a hover short of the pad instead of going around.
+   */
+  private updateHeliApproach(ac: SimAircraft, dt: number) {
+    const pad = ac.pad!;
+    const holdAt = ac.clearedLand ? 0 : 700;
+    const room = Math.max(0, ac.finalDist - holdAt);
+    const target = Math.min(90 * KT, Math.sqrt(2 * 0.5 * room));
+    ac.speed += Math.sign(target - ac.speed) * Math.min(Math.abs(target - ac.speed), 1.5 * dt);
+    ac.finalDist = Math.max(holdAt, ac.finalDist - ac.speed * dt);
+    const f = headingVec(ac.heading);
+    ac.pos = { x: pad.p.x - f.x * ac.finalDist, z: pad.p.z - f.z * ac.finalDist };
+    ac.alt = Math.min(300, Math.max(15, ac.finalDist * Math.tan((7 * Math.PI) / 180)));
+    // nose down while cruising, nose up to slow down near the pad
+    ac.pitch = ac.speed > 20 ? -3 : target < ac.speed ? 4 : 0;
+    if (dt === 0) return;
+    if (ac.clearedLand && ac.finalDist < 2) {
+      ac.phase = 'HOVER';
+      ac.speed = 0;
+      ac.finalDist = 0;
+      ac.pos = { ...pad.p };
+      ac.pitch = 0;
+    }
+  }
+
+  /** Over the pad: settle vertically onto it. */
+  private updateHover(ac: SimAircraft, dt: number) {
+    ac.alt = Math.max(0, ac.alt - (ac.alt > 5 ? 2 : 0.8) * dt);
+    if (ac.alt > 0) return;
+    const pad = ac.pad!;
+    this.parkOnPad(ac, pad);
+    ac.landedAt = this.time;
+    this.stats.landed++;
+    this.say('PILOT', `${ac.tel}, down on helipad ${pad.ref}`, ac);
+    this.addScore(100, `${ac.callsign} landed on helipad ${pad.ref}`, true);
+    this.beginTurnaround(ac, 0);
+    if (Math.random() < 0.5) ac.services.fuel = 'todo';
+    ac.minTurn = 150;
+    ac.gateRef = pad.ref;
+    this.logHistory('ARR', ac, this.time);
+    // the next local flight
+    ac.kind = 'DEP';
+    ac.origin = this.opts.iata;
+    ac.dest = 'LCL';
+    ac.std = this.time + ac.minTurn + 240;
+  }
+
+  /** Vertical lift into a hover, then forward flight climbing out into the wind. */
+  private updateLiftoff(ac: SimAircraft, dt: number) {
+    const hoverAlt = 12;
+    if (ac.pad) {
+      ac.alt += 1.5 * dt;
+      ac.pitch = 0;
+      if (ac.alt < hoverAlt) return;
+      ac.gateRef = ac.pad.ref;
+      ac.pad.occupant = null;
+      ac.pad = null;
+      this.logHistory('DEP', ac, this.time);
+    }
+    ac.speed = Math.min(100 * KT, ac.speed + 1.6 * dt);
+    ac.alt += (ac.speed > 15 ? 4.5 : 1) * dt;
+    ac.pitch = -4;
+    const f = headingVec(ac.heading);
+    ac.pos = { x: ac.pos.x + f.x * ac.speed * dt, z: ac.pos.z + f.z * ac.speed * dt };
+    if (ac.alt > 450 || dist(ac.pos, { x: 0, z: 0 }) > 9000) {
+      ac.phase = 'GONE';
+      ac.cleanupAt = this.time;
+      this.stats.departed++;
+      this.addScore(100, `${ac.callsign} departed (local helicopter flight)`, true);
+    }
+  }
+
   goAround(ac: SimAircraft, reason: string, penalty: number) {
     if (ac.phase !== 'APPROACH') return;
+    if (ac.heli) {
+      // a helicopter just stops and holds in a hover until cleared again
+      ac.clearedLand = false;
+      this.say('TWR', `${ac.tel}, hold position, remain clear of helipad ${ac.pad?.ref}`, ac);
+      this.say('PILOT', `Holding, ${ac.tel}`, ac);
+      return;
+    }
     ac.phase = 'GO_AROUND';
     ac.goArounds++;
     this.stats.goArounds++;
@@ -760,6 +961,12 @@ export class Simulation {
   private updateParked(ac: SimAircraft) {
     if (ac.dormant) return;
     const allDone = SERVICE_KINDS.every((k) => ac.services[k] === 'done');
+    if (allDone && this.time - ac.onBlocksAt >= ac.minTurn && ac.heli) {
+      ac.phase = 'PAD_READY';
+      if (!ac.std) ac.std = this.time + 90;
+      this.say('PILOT', `${this.opts.radioName} Tower, ${ac.tel}, helipad ${ac.pad?.ref}, ready for departure, local flight`, ac);
+      return;
+    }
     if (allDone && this.time - ac.onBlocksAt >= ac.minTurn) {
       if (ac.kind === 'ARR') this.becomeDeparture(ac);
       ac.phase = 'READY';
@@ -820,7 +1027,7 @@ export class Simulation {
 
   private dispatchVehicle(kind: VehicleKind, ac: SimAircraft): Vehicle | null {
     const spot = this.serviceSpot(ac, kind);
-    return this.fleet.dispatch(kind, ac.id, spot, ac.stand?.entry ?? null);
+    return this.fleet.dispatch(kind, ac.id, spot, ac.stand?.entry ?? (ac.pad ? this.graph.nearestNode(ac.pad.p, (n) => !n.runwayId) : null));
   }
 
   private updateVehicles(dt: number) {
@@ -973,7 +1180,10 @@ export class Simulation {
     if (ac.emergency && !ac.fireAlerted && (ac.phase === 'APPROACH' || ac.phase === 'ROLLOUT')) return { key: 'fire', who: 'ALERT', text: 'EMERGENCY — alert fire services' };
     switch (ac.phase) {
       case 'APPROACH':
+        if (ac.heli) return ac.clearedLand ? null : { key: 'land', who: 'TWR', text: `Request landing helipad ${ac.pad?.ref}`, passive: ac.finalDist > 3000 };
         return ac.clearedLand ? null : { key: 'land', who: 'TWR', text: `Request landing RWY ${ac.rwy?.name}`, passive: ac.finalDist > 9000 };
+      case 'PAD_READY':
+        return { key: 'takeoff', who: 'TWR', text: `Ready for departure helipad ${ac.pad?.ref}` };
       case 'ROLLOUT':
         return ac.path && !ac.taxiCleared ? { key: 'taxiin', who: 'GND', text: 'Vacating — taxi clearance', passive: true } : null;
       case 'VACATED':
@@ -1016,7 +1226,7 @@ export class Simulation {
     this.autoTimers.set(ac.id, 0);
     switch (key) {
       case 'fire': this.alertFire(ac); break;
-      case 'land': if (ac.finalDist < 8000 && this.landingSafe(ac.rwy!.runway, ac)) this.clearLanding(ac); break;
+      case 'land': if (ac.heli ? ac.finalDist < 3000 : ac.finalDist < 8000 && this.landingSafe(ac.rwy!.runway, ac)) this.clearLanding(ac); break;
       case 'cross': { const h = this.nextHold(ac); if (h && this.crossingSafe(h, ac)) this.crossRunway(ac); break; }
       case 'lineup': {
         const rw = ac.rwy!.runway;
@@ -1024,7 +1234,7 @@ export class Simulation {
         else if (this.runwayOccupants(rw).length === 0 && !this.runwayReserved(rw, ac) && !this.aircraft.some((a) => a.phase === 'APPROACH' && a.rwy?.runway === rw && a.finalDist < 7000)) this.lineUp(ac);
         break;
       }
-      case 'takeoff': if (this.takeoffSafe(ac)) this.clearTakeoff(ac); break;
+      case 'takeoff': if (ac.heli || this.takeoffSafe(ac)) this.clearTakeoff(ac); break;
       case 'taxiin': this.taxiToStand(ac); break;
       case 'push': this.approvePushback(ac); break;
       case 'taxiout': this.taxiToRunway(ac); break;
@@ -1048,6 +1258,11 @@ export class Simulation {
   clearLanding(ac: SimAircraft) {
     if (ac.phase !== 'APPROACH' || ac.clearedLand) return;
     ac.clearedLand = true;
+    if (ac.heli) {
+      this.say('TWR', `${ac.tel}, wind ${this.windText()}, helipad ${ac.pad?.ref}, cleared to land`, ac);
+      this.say('PILOT', `Cleared to land helipad ${ac.pad?.ref}, ${ac.tel}`, ac);
+      return;
+    }
     this.say('TWR', `${ac.tel}, runway ${ac.rwy!.name}, wind ${this.windText()}, cleared to land`, ac);
     this.say('PILOT', `Cleared to land runway ${ac.rwy!.name}, ${ac.tel}`, ac);
   }
@@ -1141,7 +1356,7 @@ export class Simulation {
       return false;
     }
     ac.services[kind] = 'enroute';
-    this.say('RAMP', `${{ fuel: 'Fuel truck', catering: 'Catering truck', baggage: 'Baggage team', cleaning: 'Cleaning crew' }[kind]} dispatched to ${ac.callsign} at stand ${ac.stand?.ref}`, ac);
+    this.say('RAMP', `${{ fuel: 'Fuel truck', catering: 'Catering truck', baggage: 'Baggage team', cleaning: 'Cleaning crew' }[kind]} dispatched to ${ac.callsign} at ${ac.pad ? 'helipad' : 'stand'} ${ac.standRef}`, ac);
     return true;
   }
 
@@ -1261,6 +1476,14 @@ export class Simulation {
   }
 
   clearTakeoff(ac: SimAircraft) {
+    if (ac.phase === 'PAD_READY') {
+      ac.takeoffCleared = true;
+      ac.phase = 'LIFTOFF';
+      ac.heading = this.heliHeading(ac.pad!);
+      this.say('TWR', `${ac.tel}, wind ${this.windText()}, helipad ${ac.pad?.ref}, cleared for takeoff, departure ${compass(ac.heading)}bound`, ac);
+      this.say('PILOT', `Cleared for takeoff helipad ${ac.pad?.ref}, ${ac.tel}`, ac);
+      return;
+    }
     if (ac.phase !== 'HOLD_SHORT' && ac.phase !== 'LINED_UP' && ac.phase !== 'LINEUP') return;
     if (ac.phase === 'HOLD_SHORT') {
       const h = this.nextHold(ac);

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { AirportLayout, PolyFeature, Runway } from '../data/osm';
 import type { TaxiGraph } from '../sim/taxiGraph';
 import { type XZ, dist, headingToRotY, headingVec } from '../geo/projection';
@@ -152,47 +153,71 @@ export function buildAirportScene(layout: AirportLayout, graph: TaxiGraph): Airp
   group.add(flatMesh(white.build(), 0xf4f4f0, -5, { lit: false }));
 
   // ---------- buildings ----------
-  const byKind: Record<string, THREE.BufferGeometry[]> = { terminal: [], hangar: [], building: [] };
+  // Walls carry a facade texture in real metres (glazed curtain wall, metal cladding or
+  // windowed concrete); roofs are separate, flat and lighter.
+  const walls: Record<BuildingKind, THREE.BufferGeometry[]> = { terminal: [], hangar: [], building: [] };
+  const roofs: Record<BuildingKind, THREE.BufferGeometry[]> = { terminal: [], hangar: [], building: [] };
   for (const p of layout.polys) {
     if (p.kind === 'apron' || p.kind === 'helipad') continue;
     try {
-      byKind[p.kind].push(extrude(p));
+      walls[p.kind].push(buildingWalls(p, FACADES[p.kind]));
+      roofs[p.kind].push(buildingRoof(p));
     } catch { /* degenerate footprint */ }
   }
-  const buildingMats: Record<string, THREE.Material> = {
-    terminal: new THREE.MeshStandardMaterial({ color: 0xa9bccb, roughness: 0.35, metalness: 0.35 }),
-    hangar: new THREE.MeshStandardMaterial({ color: 0xd6d9dd, roughness: 0.6, metalness: 0.2 }),
-    building: new THREE.MeshStandardMaterial({ color: 0xcfc6b8, roughness: 0.85 }),
-  };
-  for (const k of Object.keys(byKind)) {
-    if (!byKind[k].length) continue;
-    const m = new THREE.Mesh(mergeGeometries(byKind[k]), buildingMats[k]);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    group.add(m);
+  const facades = facadeMaterials();
+  for (const k of BUILDING_KINDS) {
+    if (walls[k].length) {
+      const m = new THREE.Mesh(mergeGeometries(walls[k]), facades.walls[k]);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      group.add(m);
+    }
+    if (roofs[k].length) {
+      const m = new THREE.Mesh(mergeGeometries(roofs[k]), facades.roofs[k]);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      group.add(m);
+    }
   }
 
   // ---------- jet bridges ----------
-  const bridges: THREE.BufferGeometry[] = [];
+  // Fixed links from the building are simple boxes; the movable apron-drive bridge out to the
+  // aircraft is a model (rotunda, telescoping tunnel, wheel bogie, cab), boxes until it loads.
+  const fixed: THREE.BufferGeometry[] = [];
+  const movable: { from: XZ; to: XZ }[] = [];
+  const bridgeBox = (a: XZ, b: XZ, into: THREE.BufferGeometry[]) => {
+    const len = dist(a, b);
+    if (len < 0.5) return;
+    const g = new THREE.BoxGeometry(3.2, 3.2, len);
+    g.rotateY(Math.atan2(b.x - a.x, b.z - a.z));
+    g.translate((a.x + b.x) / 2, 4.6, (a.z + b.z) / 2);
+    into.push(g);
+  };
+  const buildings = layout.polys.filter((p) => p.kind === 'terminal' || p.kind === 'building' || p.kind === 'hangar');
   for (const ln of layout.lines) {
-    if (ln.kind !== 'jet_bridge') continue;
-    for (let i = 1; i < ln.pts.length; i++) {
-      const a = ln.pts[i - 1], b = ln.pts[i];
-      const len = dist(a, b);
-      if (len < 0.5) continue;
-      const g = new THREE.BoxGeometry(3.2, 3.2, len);
-      g.rotateY(Math.atan2(b.x - a.x, b.z - a.z));
-      g.translate((a.x + b.x) / 2, 4.6, (a.z + b.z) / 2);
-      bridges.push(g);
-      const leg = new THREE.CylinderGeometry(0.35, 0.35, 3, 6);
-      leg.translate(b.x, 1.5, b.z);
-      bridges.push(leg);
-    }
+    if (ln.kind !== 'jet_bridge' || ln.pts.length < 2) continue;
+    // mappers draw them either way: the aircraft end is the one away from the buildings
+    const pts = distToBuildings(ln.pts[0], buildings) <= distToBuildings(ln.pts[ln.pts.length - 1], buildings) ? ln.pts : ln.pts.slice().reverse();
+    for (let i = 1; i < pts.length - 1; i++) bridgeBox(pts[i - 1], pts[i], fixed);
+    const from = pts[pts.length - 2], to = pts[pts.length - 1];
+    if (dist(from, to) >= 0.5) movable.push({ from, to });
   }
-  if (bridges.length) {
-    const m = new THREE.Mesh(mergeGeometries(bridges.map((g) => g.index ? g.toNonIndexed() : g)), new THREE.MeshStandardMaterial({ color: 0xb8bcc2, roughness: 0.5, metalness: 0.4 }));
+  const bridgeMat = new THREE.MeshStandardMaterial({ color: 0xe8e8e4, roughness: 0.5, metalness: 0.3 });
+  if (fixed.length) {
+    const m = new THREE.Mesh(mergeGeometries(fixed.map((g) => g.index ? g.toNonIndexed() : g)), bridgeMat);
     m.castShadow = true;
     group.add(m);
+  }
+  if (movable.length) {
+    const stand = movable.map(({ from, to }) => { const g: THREE.BufferGeometry[] = []; bridgeBox(from, to, g); return g[0]; }).filter(Boolean);
+    const placeholder = new THREE.Mesh(mergeGeometries(stand.map((g) => g.index ? g.toNonIndexed() : g)), bridgeMat);
+    placeholder.castShadow = true;
+    group.add(placeholder);
+    void jetBridgeModels(movable).then((models) => {
+      if (!models) return;
+      group.remove(placeholder);
+      group.add(models);
+    });
   }
 
   // ---------- control tower ----------
@@ -222,17 +247,199 @@ export function buildAirportScene(layout: AirportLayout, graph: TaxiGraph): Airp
     group, nightGroup, standLabels, tower, towerCab,
     setNight(n: boolean) {
       nightGroup.visible = n;
-      (buildingMats.terminal as THREE.MeshStandardMaterial).emissive.set(n ? 0x3a3020 : 0x000000);
+      // lit interiors show through the glass only (the emissive map is the window mask)
+      for (const k of BUILDING_KINDS) facades.walls[k].emissive.set(n ? 0x5c4a30 : 0x000000);
     },
   };
 }
 
-function extrude(p: PolyFeature): THREE.BufferGeometry {
-  const h = Math.max(3, p.height - p.minHeight);
-  const g = new THREE.ExtrudeGeometry(shapeFrom(p.outer, p.holes), { depth: h, bevelEnabled: false });
+/** Shortest distance from p to any building outline (0 inside one). */
+function distToBuildings(p: XZ, polys: PolyFeature[]): number {
+  let best = Infinity;
+  for (const poly of polys) {
+    const ring = poly.outer;
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const a = ring[i], b = ring[j];
+      if ((a.z > p.z) !== (b.z > p.z) && p.x < ((b.x - a.x) * (p.z - a.z)) / (b.z - a.z) + a.x) inside = !inside;
+      const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz;
+      const t = l2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2)) : 0;
+      best = Math.min(best, Math.hypot(a.x + dx * t - p.x, a.z + dz * t - p.z));
+    }
+    if (inside) return 0;
+  }
+  return best;
+}
+
+/** Model length of the CC0 jet bridge (3DAssets.dev), rotunda at -z, cab at +z. */
+const JET_BRIDGE_LENGTH = 21.91;
+
+/**
+ * One instanced mesh per part of the jet bridge model, an instance per bridge: rotunda end at
+ * `from`, cab at `to`, stretched along its length to fit (within limits). Null if it won't load.
+ */
+async function jetBridgeModels(bridges: { from: XZ; to: XZ }[]): Promise<THREE.Group | null> {
+  let scene: THREE.Group;
+  try {
+    scene = (await new GLTFLoader().loadAsync('/models/terminal/jet-bridge.glb')).scene;
+  } catch {
+    return null;
+  }
+  scene.updateMatrixWorld(true);
+  const place = bridges.map(({ from, to }) => {
+    const len = dist(from, to);
+    const m = new THREE.Matrix4().compose(
+      new THREE.Vector3((from.x + to.x) / 2, 0, (from.z + to.z) / 2),
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(to.x - from.x, to.z - from.z)),
+      new THREE.Vector3(1, 1, Math.min(1.8, Math.max(0.6, len / JET_BRIDGE_LENGTH))),
+    );
+    return m;
+  });
+  const out = new THREE.Group();
+  scene.traverse((o) => {
+    if (!(o instanceof THREE.Mesh)) return;
+    // bake the part's own transform into its geometry, then place one copy per bridge
+    // (the file is quantised: normalised integers can't hold baked metres, so go to floats)
+    const geo = o.geometry.clone();
+    for (const name of ['position', 'normal']) {
+      const a = geo.getAttribute(name);
+      if (!a || a.array instanceof Float32Array) continue;
+      const f = new Float32Array(a.count * a.itemSize);
+      for (let i = 0; i < a.count; i++) for (let k = 0; k < a.itemSize; k++) f[i * a.itemSize + k] = a.getComponent(i, k);
+      geo.setAttribute(name, new THREE.BufferAttribute(f, a.itemSize));
+    }
+    geo.applyMatrix4(o.matrixWorld);
+    const inst = new THREE.InstancedMesh(geo, o.material, place.length);
+    place.forEach((m, i) => inst.setMatrixAt(i, m));
+    inst.castShadow = true;
+    out.add(inst);
+  });
+  return out;
+}
+
+type BuildingKind = 'terminal' | 'hangar' | 'building';
+const BUILDING_KINDS: BuildingKind[] = ['terminal', 'hangar', 'building'];
+
+/** Size in metres of one repeat of each facade texture (one bay wide, one storey high). */
+const FACADES: Record<BuildingKind, { w: number; h: number }> = {
+  terminal: { w: 3, h: 6 },
+  hangar: { w: 6, h: 25 },
+  building: { w: 3, h: 3.6 },
+};
+
+/** Vertical walls of a footprint (outer ring and courtyards), with UVs in facade repeats. */
+function buildingWalls(p: PolyFeature, tile: { w: number; h: number }): THREE.BufferGeometry {
+  const y0 = p.minHeight, y1 = Math.max(p.minHeight + 3, p.height);
+  const pos: number[] = [], uv: number[] = [];
+  for (const ring of [p.outer, ...p.holes]) {
+    let along = 0;
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      const len = dist(a, b);
+      if (len < 0.05) continue;
+      // whole bays per wall, so mullions meet the corners
+      const u0 = Math.round(along / tile.w), u1 = u0 + Math.max(1, Math.round(len / tile.w));
+      along += len;
+      const v0 = y0 / tile.h, v1 = y1 / tile.h;
+      pos.push(a.x, y0, a.z, b.x, y0, b.z, b.x, y1, b.z, a.x, y0, a.z, b.x, y1, b.z, a.x, y1, a.z);
+      uv.push(u0, v0, u1, v0, u1, v1, u0, v0, u1, v1, u0, v1);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.computeVertexNormals();
+  return g;
+}
+
+function buildingRoof(p: PolyFeature): THREE.BufferGeometry {
+  const g = new THREE.ShapeGeometry(shapeFrom(p.outer, p.holes));
   g.rotateX(-Math.PI / 2);
-  g.translate(0, p.minHeight, 0);
+  g.translate(0, Math.max(p.minHeight + 3, p.height), 0);
+  g.deleteAttribute('uv');
   return g.index ? g.toNonIndexed() : g;
+}
+
+/** A repeating facade texture drawn on a canvas; `glass` marks what glows at night. */
+function facadeTexture(px: { w: number; h: number }, draw: (c: CanvasRenderingContext2D, w: number, h: number) => void): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = px.w;
+  canvas.height = px.h;
+  draw(canvas.getContext('2d')!, px.w, px.h);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 8;
+  return tex;
+}
+
+function facadeMaterials() {
+  // terminal: floor-to-ceiling glazing between mullions, a spandrel panel at each floor slab
+  const termDraw = (glow: boolean) => (c: CanvasRenderingContext2D, w: number, h: number) => {
+    const slab = h * 0.14;
+    if (glow) {
+      c.fillStyle = '#000';
+      c.fillRect(0, 0, w, h);
+      c.fillStyle = '#fff';
+      c.fillRect(3, 0, w - 6, h - slab);
+      return;
+    }
+    const g = c.createLinearGradient(0, 0, 0, h - slab);
+    g.addColorStop(0, '#8fb0c9');
+    g.addColorStop(1, '#46657f');
+    c.fillStyle = g;
+    c.fillRect(0, 0, w, h);
+    c.fillStyle = '#d5dade';
+    c.fillRect(0, h - slab, w, slab);
+    c.fillStyle = '#2f353c';
+    c.fillRect(0, 0, 3, h);
+    c.fillRect(w - 3, 0, 3, h);
+    c.fillRect(0, h * 0.42, w, 2);
+  };
+  // hangar: vertical ribbed metal cladding with a darker band of door panels at the bottom
+  const hangarDraw = (c: CanvasRenderingContext2D, w: number, h: number) => {
+    c.fillStyle = '#cfd3d7';
+    c.fillRect(0, 0, w, h);
+    for (let x = 0; x < w; x += 8) {
+      c.fillStyle = '#b4b9bf';
+      c.fillRect(x, 0, 3, h);
+    }
+    c.fillStyle = 'rgba(70, 80, 92, 0.35)';
+    c.fillRect(0, h * 0.45, w, h * 0.55);
+    c.fillStyle = '#8b939b';
+    c.fillRect(0, h * 0.45, w, 3);
+  };
+  // other buildings: concrete panels with a strip of windows on each storey
+  const buildingDraw = (glow: boolean) => (c: CanvasRenderingContext2D, w: number, h: number) => {
+    const win = { x: w * 0.12, y: h * 0.28, w: w * 0.76, h: h * 0.42 };
+    c.fillStyle = glow ? '#000' : '#cdc6bb';
+    c.fillRect(0, 0, w, h);
+    c.fillStyle = glow ? '#fff' : '#3d4a56';
+    c.fillRect(win.x, win.y, win.w, win.h);
+    if (!glow) {
+      c.fillStyle = '#b9b2a7';
+      c.fillRect(0, h - 3, w, 3);
+    }
+  };
+  const tile = { w: 64, h: 96 };
+  const walls: Record<BuildingKind, THREE.MeshStandardMaterial> = {
+    terminal: new THREE.MeshStandardMaterial({
+      map: facadeTexture(tile, termDraw(false)), emissiveMap: facadeTexture(tile, termDraw(true)),
+      roughness: 0.25, metalness: 0.35, side: THREE.DoubleSide,
+    }),
+    hangar: new THREE.MeshStandardMaterial({ map: facadeTexture({ w: 64, h: 256 }, hangarDraw), roughness: 0.55, metalness: 0.3, side: THREE.DoubleSide }),
+    building: new THREE.MeshStandardMaterial({
+      map: facadeTexture(tile, buildingDraw(false)), emissiveMap: facadeTexture(tile, buildingDraw(true)),
+      roughness: 0.85, side: THREE.DoubleSide,
+    }),
+  };
+  walls.hangar.emissiveMap = facadeTexture({ w: 4, h: 4 }, (c, w, h) => { c.fillStyle = '#000'; c.fillRect(0, 0, w, h); });
+  for (const k of BUILDING_KINDS) walls[k].map!.colorSpace = THREE.SRGBColorSpace;
+  const roofs: Record<BuildingKind, THREE.MeshStandardMaterial> = {
+    terminal: new THREE.MeshStandardMaterial({ color: 0xd9dcdf, roughness: 0.7, metalness: 0.15 }),
+    hangar: new THREE.MeshStandardMaterial({ color: 0xc4c9ce, roughness: 0.5, metalness: 0.35 }),
+    building: new THREE.MeshStandardMaterial({ color: 0xa9a49c, roughness: 0.9 }),
+  };
+  return { walls, roofs };
 }
 
 function runwayMarkings(r: Runway, b: FlatBatch) {

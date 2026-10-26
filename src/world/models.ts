@@ -69,21 +69,44 @@ function aircraftAsset(spec: TypeSpec): { name: string; yaw: number } | null {
   if (/^(E170|E75L|E190|E195|E295)$/.test(spec.code)) return { name: 'E190', yaw: Math.PI / 2 };
   // These have their nose along +Z: a half turn. The Bell 206 (stand-in for the 407 it was
   // developed into) already points along -Z.
-  if (/^CRJ/.test(spec.code)) return { name: 'CRJ9', yaw: Math.PI };
+  // CRJ family, and business jets (the CRJ grew out of the Challenger business jet)
+  if (/^(CRJ|CL60)/.test(spec.code)) return { name: 'CRJ9', yaw: Math.PI };
+  if (/^DH8/.test(spec.code)) return { name: 'DH8D', yaw: Math.PI };
+  // ATRs: the Q400 is the closest shape (high-wing twin turboprop), fitted to ATR size
+  if (/^AT/.test(spec.code)) return { name: 'DH8D', yaw: Math.PI };
+  // 747-400 model, also stretched to the longer 747-8 (no free 747-8 model exists)
+  if (/^B74/.test(spec.code)) return { name: 'B744', yaw: Math.PI };
   if (spec.size === 'light') return { name: 'C172', yaw: Math.PI };
   if (spec.size === 'heli') return { name: 'B06', yaw: 0 };
   // Keep the built-in layout where the available assets have the wrong silhouette.
-  if (/^(A34|B74)/.test(spec.code)) return null;
+  if (/^A34/.test(spec.code)) return null;
   if (spec.size === 'jumbo') return spec.code === 'A388' ? { name: 'A380', yaw: Math.PI / 2 } : null;
   if (spec.size === 'wide') {
     if (/^B78/.test(spec.code)) return { name: 'B787', yaw: Math.PI / 2 };
     if (/^B77/.test(spec.code)) return { name: 'B787', yaw: Math.PI / 2 };
     return { name: 'A350', yaw: Math.PI / 2 };
   }
-  if (spec.size === 'narrow') return /^B73/.test(spec.code)
+  if (spec.size === 'narrow') return /^(B73|B3)/.test(spec.code)
     ? { name: 'B737', yaw: Math.PI / 2 }
     : { name: 'A320', yaw: Math.PI / 2 };
   return null;
+}
+
+/** Whether a type is drawn with a real 3D model (not the procedural fallback). */
+export function hasAircraftModel(spec: TypeSpec): boolean {
+  return aircraftAsset(spec) !== null;
+}
+
+/** Every model file, so the loading screen can fetch them before the first frame. */
+const AIRCRAFT_ASSETS = ['A320', 'A350', 'A380', 'B737', 'B744', 'B752', 'B763', 'B787', 'E190', 'CRJ9', 'DH8D', 'C172', 'B06'];
+
+/** Load all aircraft and vehicle models (give up waiting after `timeoutMs`; they keep loading). */
+export function preloadModels(timeoutMs = 20_000): Promise<void> {
+  const all = Promise.all([
+    ...AIRCRAFT_ASSETS.map(loadAircraftAsset),
+    ...[...Object.values(vehicleAssetFiles), 'baggage-tug', 'baggage-cart'].map((n) => loadVehicleAsset(n!)),
+  ]).then(() => {});
+  return Promise.race([all, new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))]);
 }
 
 function loadAircraftAsset(name: string): Promise<THREE.Group | null> {
@@ -98,7 +121,7 @@ function loadAircraftAsset(name: string): Promise<THREE.Group | null> {
 }
 
 /** Types drawn with a sibling's model, stretched to their own length and span. */
-const STRETCHED = /^(E170|E75L|E190|E195|E295|CRJ2|CRJ7|CRJ9|CRJX)$/;
+const STRETCHED = /^(E170|E75L|E190|E195|E295|CL60|CRJ2|CRJ7|CRJ9|CRJX|DH8A|DH8B|DH8C|DH8D|AT45|AT76|B744|B748)$/;
 
 function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, airline: string | null): { model: THREE.Group; box: THREE.Box3; tips: THREE.Vector3[]; fin: THREE.Vector3 } {
   // turned inside the group that gets scaled, so scale x is always the span and z the length
@@ -156,7 +179,7 @@ function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, 
   const originalSize = originalBox.getSize(new THREE.Vector3());
   const spanScale = spec.span / originalSize.x;
   const lengthScale = spec.length / originalSize.z;
-  // Fit the E-Jet and CRJ families' length and span independently. In particular,
+  // Fit the E-Jet, CRJ and Dash 8 families' length and span independently. In particular,
   // the E175 is shorter than the E190 while its published wingspan is the same.
   if (STRETCHED.test(spec.code)) model.scale.set(spanScale, Math.min(spanScale, lengthScale), lengthScale);
   else model.scale.setScalar(Math.min(spanScale, lengthScale));
@@ -190,7 +213,122 @@ function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, 
   const tips = tipSums.map((sum, i) => tipCounts[i]
     ? sum.multiplyScalar(1 / tipCounts[i])
     : new THREE.Vector3(i === 0 ? normalizedBox.min.x : normalizedBox.max.x, spec.length * 0.1, spec.length * 0.04));
+  paintLivery(model, normalizedBox, spec, airline);
   return { model, box: normalizedBox, tips, fin };
+}
+
+type PreparedAsset = ReturnType<typeof prepareAircraftAsset>;
+/** One prepared model per type and airline; aircraft get clones (geometry and materials shared). */
+const preparedAssets = new Map<string, PreparedAsset>();
+
+const NEUTRAL_MATERIAL = 'CAT neutral reference';
+
+/**
+ * Airline livery for the plain (neutral-material) models, painted in the fragment shader from
+ * each point's position on the aircraft, so the edges stay crisp on low-poly hulls: tail in
+ * the airline colour, an accent cheatline along the cabin, a grey belly. Helicopters get a
+ * two-tone body. The shape (fuselage radius, centre line, nose, tail) is measured here.
+ */
+function paintLivery(model: THREE.Group, box: THREE.Box3, spec: TypeSpec, airline: string | null) {
+  const meshes: THREE.Mesh[] = [];
+  model.traverse((o) => {
+    if (!(o instanceof THREE.Mesh)) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    if (mats.some((m: THREE.Material) => m.name === NEUTRAL_MATERIAL)) meshes.push(o);
+  });
+  if (!meshes.length) return;
+  const heli = spec.size === 'heli';
+  // body points only: near the centre line (no wings or engines), below rotor/fin tops
+  const nearAxis = Math.max(0.6, spec.span * (heli ? 0.06 : 0.08));
+  const low = box.max.y * 0.8;
+  const pts: THREE.Vector3[] = [];
+  const v = new THREE.Vector3();
+  for (const m of meshes) {
+    const pos = m.geometry.getAttribute('position');
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+      if (Math.abs(v.x) < nearAxis && v.y < low) pts.push(v.clone());
+    }
+  }
+  if (pts.length < 20) return;
+  const nose = Math.min(...pts.map((p) => p.z));
+  const length = box.max.z - nose;
+  // Measure the cabin with rays at a few stations (the hulls are too low-poly to sample
+  // vertices): down and up at the centre line for roof and belly, sideways at half height for
+  // the width. Stations sit between the nose gear and the wing and its propellers.
+  const ray = new THREE.Raycaster();
+  const hitAt = (from: THREE.Vector3, dir: THREE.Vector3, accept = (_p: THREE.Vector3) => true) => {
+    ray.set(from, dir);
+    return ray.intersectObjects(meshes, false).find((h) => accept(h.point))?.point ?? null;
+  };
+  // helicopters: start below the parked rotor, and look past the skids and their cross tubes
+  const roofFrom = heli ? low : box.max.y + 1;
+  const aboveSkids = (p: THREE.Vector3) => !heli || p.y > box.min.y + 0.4;
+  const roofs: number[] = [], bellies: number[] = [], halves: number[] = [];
+  for (const f of [0.17, 0.21, 0.25]) {
+    const z = nose + length * f;
+    const roof = hitAt(new THREE.Vector3(0, roofFrom, z), new THREE.Vector3(0, -1, 0));
+    const bottom = hitAt(new THREE.Vector3(0, box.min.y - 1, z), new THREE.Vector3(0, 1, 0), aboveSkids);
+    if (!roof || !bottom || roof.y <= bottom.y) continue;
+    const wall = hitAt(new THREE.Vector3(box.max.x + 1, (roof.y + bottom.y) / 2, z), new THREE.Vector3(-1, 0, 0));
+    roofs.push(roof.y); bellies.push(bottom.y);
+    if (wall) halves.push(wall.x);
+  }
+  if (!halves.length) return;
+  const median = (xs: number[]) => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+  const radius = median(halves);
+  // from the belly up: a double-deck hump (747) only raises the roof
+  const centre = median(bellies) + radius;
+  const colors = airlineColors(airline);
+  for (const m of meshes) {
+    const liveryMatrix = m.matrixWorld.clone();
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    const painted = mats.map((mat: THREE.Material) => {
+      if (mat.name !== NEUTRAL_MATERIAL) return mat;
+      const paint = (mat as THREE.MeshStandardMaterial).clone();
+      paint.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, {
+          liveryMatrix: { value: liveryMatrix },
+          lvTail: { value: new THREE.Color(colors.tail) },
+          lvAccent: { value: new THREE.Color(colors.accent) },
+          lvBelly: { value: new THREE.Color(0xb9bec6) },
+          // radius, centre line height, heli flag
+          lvShape: { value: new THREE.Vector3(radius, centre, heli ? 1 : 0) },
+          // nose, where the tail paint starts
+          lvZ: { value: new THREE.Vector2(nose, nose + length * (heli ? 0.45 : 0.76)) },
+        });
+        shader.vertexShader = shader.vertexShader
+          .replace('#include <common>', '#include <common>\nuniform mat4 liveryMatrix;\nvarying vec3 vLivery;')
+          .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLivery = (liveryMatrix * vec4(transformed, 1.0)).xyz;');
+        shader.fragmentShader = shader.fragmentShader
+          .replace('#include <common>', '#include <common>\nuniform vec3 lvTail, lvAccent, lvBelly;\nuniform vec3 lvShape;\nuniform vec2 lvZ;\nvarying vec3 vLivery;')
+          .replace('#include <color_fragment>', `#include <color_fragment>
+            vec3 lp = vLivery;
+            float lR = lvShape.x, lMid = lvShape.y, side = abs(lp.x);
+            float onBody = step(side, lR * 1.15) * step(lvZ.x, lp.z);
+            float cabin = onBody * step(lp.z, lvZ.y);
+            if (lvShape.z > 0.5) {
+              // helicopter: lower body and tail boom in the operator colour, accent stripe
+              float lower = step(side, lR * 1.3) * step(lp.y, lMid);
+              float boom = step(lvZ.y, lp.z) * step(side, lR);
+              diffuseColor.rgb = mix(diffuseColor.rgb, lvTail, max(lower, boom));
+              float stripe = step(side, lR * 1.3) * step(lMid, lp.y) * step(lp.y, lMid + lR * 0.18) * step(lp.z, lvZ.y);
+              diffuseColor.rgb = mix(diffuseColor.rgb, lvAccent, stripe);
+            } else {
+              float belly = onBody * step(lp.y, lMid - lR * 0.55);
+              diffuseColor.rgb = mix(diffuseColor.rgb, lvBelly, belly);
+              float cheat = cabin * step(lR * 0.3, side) * step(lp.z, lvZ.y) * step(lvZ.x + (lvZ.y - lvZ.x) * 0.08, lp.z)
+                * step(lMid - lR * 0.22, lp.y) * step(lp.y, lMid + lR * 0.04);
+              diffuseColor.rgb = mix(diffuseColor.rgb, lvAccent, cheat);
+              float tail = step(lvZ.y, lp.z) * step(lMid + lR * 0.55, lp.y);
+              diffuseColor.rgb = mix(diffuseColor.rgb, lvTail, tail);
+            }`);
+      };
+      paint.customProgramCacheKey = () => 'airport-livery-v1';
+      return paint;
+    });
+    m.material = Array.isArray(m.material) ? painted : painted[0];
+  }
 }
 
 function buildTemplate(spec: TypeSpec, airline: string | null): AircraftTemplate {
@@ -381,7 +519,10 @@ export function buildAircraft(spec: TypeSpec, airline: string | null): AircraftM
   if (asset) {
     loadAircraftAsset(asset.name).then((source) => {
       if (!source) return;
-      const prepared = prepareAircraftAsset(source, spec, asset.yaw, airline);
+      const key = `${asset.name}|${spec.code}|${airline ?? ''}`;
+      let shared = preparedAssets.get(key);
+      if (!shared) { shared = prepareAircraftAsset(source, spec, asset.yaw, airline); preparedAssets.set(key, shared); }
+      const prepared = { ...shared, model: shared.model.clone(true) };
       body.add(prepared.model);
       fallbackAirframe.visible = false;
       fallbackGear.visible = false;

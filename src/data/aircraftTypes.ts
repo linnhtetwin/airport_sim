@@ -19,6 +19,7 @@ export const TYPES: Record<string, TypeSpec> = Object.fromEntries([
   T('C172', 'Cessna 172', 'light', 8.3, 11, 2, 65, 55),
   T('P28A', 'Piper PA-28 Cherokee', 'light', 7.3, 10.7, 2, 65, 55),
   T('B407', 'Bell 407', 'heli', 12.7, 10.7, 2, 60, 0),
+  T('CL60', 'Business jet', 'regional', 20.9, 19.6, 2, 125, 120, true),
   T('E170', 'Embraer 170', 'regional', 29.9, 26, 2, 128, 123),
   T('CRJ2', 'Bombardier CRJ200', 'regional', 26.8, 21.2, 2, 140, 135, true),
   T('CRJ7', 'Bombardier CRJ700', 'regional', 32.3, 23.2, 2, 135, 130, true),
@@ -28,7 +29,11 @@ export const TYPES: Record<string, TypeSpec> = Object.fromEntries([
   T('E190', 'Embraer 190', 'regional', 36.2, 28.7, 2, 132, 128),
   T('E195', 'Embraer 195', 'regional', 38.7, 28.7, 2, 134, 130),
   T('E295', 'Embraer E195-E2', 'regional', 41.5, 35.1, 2, 136, 132),
+  T('AT45', 'ATR 42-500', 'regional', 22.7, 24.6, 2, 105, 100),
   T('AT76', 'ATR 72-600', 'regional', 27.2, 27.1, 2, 110, 105),
+  T('DH8A', 'Dash 8-100', 'regional', 22.3, 25.9, 2, 100, 95),
+  T('DH8B', 'Dash 8-200', 'regional', 22.3, 25.9, 2, 100, 95),
+  T('DH8C', 'Dash 8-300', 'regional', 25.7, 27.4, 2, 105, 100),
   T('DH8D', 'Dash 8 Q400', 'regional', 32.8, 28.4, 2, 120, 115),
   T('A318', 'Airbus A318', 'narrow', 31.44, 34.1, 2, 130, 138),
   T('A319', 'Airbus A319', 'narrow', 33.8, 35.8, 2, 132, 140),
@@ -86,10 +91,15 @@ export function typeSpec(code: string | undefined | null, category?: string): Ty
   if (/^(A32|A2|B73|B3|B75|MD8|MD9|C919|BCS|A22)/.test(c)) return TYPES.A320;
   if (/^CRJ[12]/.test(c)) return TYPES.CRJ2;
   if (/^CRJ/.test(c)) return TYPES.CRJ9;
-  if (/^(E1|E2|E7|E9|AT|DH8|SF34|SU95|J328)/.test(c)) return TYPES.E190;
+  if (/^DH8/.test(c)) return TYPES.DH8D;
+  if (/^AT4/.test(c)) return TYPES.AT45;
+  if (/^AT/.test(c)) return TYPES.AT76;
+  if (/^(E1|E2|E7|E9|AT|SF34|SU95|J328)/.test(c)) return TYPES.E190;
   if (category === 'A7' || /^(?:EC(?:20|30|35|45|55|65|75|155|175)|AS(?:32|35|50|55|65)|B0?6|B205|B206|B212|B214|B407|B412|B427|B429|B430|B47G|R22|R44|R66|S76|S92|A109|A119|A139|A169|A189|H(?:47|53|60|64|125|130|135|145|160|175|215|225|269|500)|UH1|AH64|CH47|CH53)/.test(c)) return TYPES.B407;
   if (/^(P28|P32|PA2|PA3)/.test(c)) return TYPES.P28A;
-  if (/^(C1|C2|PA|P46|M20|SR2|DA2|DA4|BE|PC12|C5|C6|C7|LJ|GLF|GL|CL|FA|E5)/.test(c) || category === 'A1' || category === 'A2') return TYPES.C172;
+  // business jets (Citation, Learjet, Gulfstream, Global/Challenger, Falcon, Phenom...) before light aircraft
+  if (/^(C5|C6|C7|LJ|GLF|GL|CL|FA|E5|H25|PRM|HDJT|PC24|EA50|G150|G280)/.test(c)) return TYPES.CL60;
+  if (/^(C1|C2|PA|P46|M20|SR2|DA2|DA4|BE|PC12)/.test(c) || category === 'A1' || category === 'A2') return TYPES.C172;
   if (category === 'A5') return TYPES.B77W;
   if (category === 'A4') return TYPES.B752;
   return TYPES.A320;
@@ -99,7 +109,7 @@ export function typeSpec(code: string | undefined | null, category?: string): Ty
 export const SIM_TYPE_POOL: Array<[string, number]> = [
   ['A320', 14], ['A20N', 8], ['A321', 9], ['A21N', 6], ['A319', 4], ['A318', 2], ['BCS3', 4], ['BCS1', 2],
   ['B738', 14], ['B38M', 6], ['B39M', 3], ['B739', 3], ['B737', 3], ['B752', 2], ['B753', 1],
-  ['E190', 5], ['E195', 3], ['E75L', 3], ['E170', 2], ['E295', 2], ['CRJ9', 3], ['CRJ7', 2], ['B407', 2],
+  ['E190', 5], ['E195', 3], ['E75L', 3], ['E170', 2], ['E295', 2], ['CRJ9', 3], ['CRJ7', 2], ['DH8D', 2],
   ['B789', 6], ['B788', 3], ['B772', 2], ['B77L', 1], ['B77W', 5], ['B763', 2], ['B764', 1], ['B748', 1], ['B744', 1],
-  ['A359', 5], ['A35K', 2], ['A333', 3], ['A332', 2], ['A339', 2], ['A338', 1], ['A343', 1], ['A346', 1], ['A388', 2],
+  ['A359', 5], ['A35K', 2], ['A333', 3], ['A332', 2], ['A339', 2], ['A338', 1], ['A388', 2],
 ];
