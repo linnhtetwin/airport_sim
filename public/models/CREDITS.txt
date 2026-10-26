@@ -15,3 +15,21 @@ https://github.com/srcejon/sdrangel-3d-models/blob/main/LICENSE
 
 E190.glb also stands in for the closely related E170, E175, E195, and E195-E2
 aircraft, fitted to each type's length and wingspan where applicable.
+
+Bombardier CRJ900 (CRJ9.glb) and Cessna 172 (C172.glb) neutral models: Bluebell
+CSL contributors, converted to glTF by SDRangel, with the airline textures
+replaced by one neutral material for Airport Ops Sim. Geometry is released
+under CC0 1.0:
+https://creativecommons.org/publicdomain/zero/1.0/
+https://github.com/srcejon/sdrangel-3d-models/tree/59d1ee24ebc2c24343afb54b26928f965a625140/BB_Jets_png/CRJ9
+https://github.com/srcejon/sdrangel-3d-models/tree/59d1ee24ebc2c24343afb54b26928f965a625140/BB_GA_png/C172
+
+CRJ9.glb also stands in for the CRJ100/200, CRJ700 and CRJ1000, fitted to each
+type's length and wingspan. C172.glb stands in for other light aircraft, such
+as the Piper PA-28.
+
+Bell 206 JetRanger (B06.glb) neutral model: Bluebell CSL contributors, CC0 1.0,
+converted from the X-Plane OBJ8 model to glTF for Airport Ops Sim (parked pose:
+rotors stopped, no pilots or light cones). It stands in for the Bell 407 and
+other helicopters:
+https://github.com/oktal3700/bluebell/blob/71d530a6dabf6165a2a4f13455942000aa0bb2b0/BB_Heli/B06/B06_C-GZPM.obj

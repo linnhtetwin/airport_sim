@@ -18,6 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **New loading screen.** A runway-style progress bar with a checklist of the real loading steps (OpenStreetMap layout, taxi network, 3D scene, satellite imagery, METAR, live traffic), download progress, elapsed time and gameplay tips. The game now waits briefly for imagery so the first view isn't grey ground.
 - **3D aircraft models.** Logo-free glTF airliners (A320, A350, A380, B737, B787 from amvlab, CC BY 4.0; B757, B767 and E190 from Bluebell CSL, CC0) replace the procedural shapes for most types, tinted with the airline's colour. The E190 model is rescaled for the E170, E175, E195 and E195-E2. Types without a matching model keep an improved procedural airframe.
 - **3D ground-service vehicles** (CC0, 3DAssets.dev): pushback tug, fuel bowser, catering truck, lavatory service truck, and baggage tug with cart.
+- 3D models for the CRJ family (CRJ900 model, stretched to the CRJ200, CRJ700 and CRJ1000), light aircraft (Cessna 172) and helicopters (Bell 206 JetRanger, standing in for the Bell 407), instead of procedural shapes. All are Bluebell CSL models (CC0). The Piper PA-28 is now its own type, drawn with the Cessna model, and CRJs are no longer drawn as E-Jets. CRJ700 and CRJ900 flights join the simulated traffic.
 - More aircraft types: A318, A220-100/-300, A330-800neo, A340-300/-600, B737-900ER, B757-300, B767-400ER, B777-200LR, E170, E195, E195-E2. Helicopter type detection is more accurate.
 - Each preset airport now has its real IANA time zone, so clocks and boards show the correct local time, daylight saving included. Other airports use FlightAware's time zone when available, then fall back to a longitude estimate.
 - Live aircraft use the true heading when the feed provides it; the details panel then shows *TRUE HDG* instead of *TRACK*.
@@ -38,6 +39,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- E-Jets drawn with another type's size (E170, E175, E195, E195-E2) had their length and wingspan scaling swapped.
+- Navigation lights and beacons are scaled to the aircraft, instead of airliner-sized spheres on light aircraft and helicopters.
 - Aircraft headings: parked live aircraft snap to their stand's heading, live aircraft point along their real nose heading instead of their ground track when the feed provides it, and the B787 / B777 models are no longer rotated 90°.
 - The frame timer resets when the browser tab returns from the background, so the simulation no longer jumps forward.
 - Overpass requests that some public servers rejected because of the site's origin.

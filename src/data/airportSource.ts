@@ -93,7 +93,7 @@ async function runQuery(query: string, deadline: number, opts: FetchLayoutOption
     // server answers 429/502/504 at once, so that moves on to the next mirror straight away.
     const left = deadline - Date.now();
     if (left < 5_000) break;
-    const slice = i === OVERPASS_MIRRORS.length - 1 ? left : Math.max(left * 0.7, left - 30_000);
+    const slice = Math.round(i === OVERPASS_MIRRORS.length - 1 ? left : Math.max(left * 0.7, left - 30_000)); // timeouts take whole ms
     const host = new URL(url).host;
     try {
       const res = await fetch(url, {

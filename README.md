@@ -6,7 +6,7 @@ Run the **tower, ground and ramp** of a real airport, built in 3D from OpenStree
 
 - **ATC Simulation** — clear landings and takeoffs, approve runway crossings, taxi aircraft to stands and runways, send marshallers, dispatch fuel / catering / baggage / cleaning trucks, pushback tugs, follow-me cars and fire tenders. Real airlines currently operating at the airport fill the schedule, and with FlightAware the airport runs today's real timetable.
 - **Live Watch** — every real aircraft around the airport in 3D, with callsign, airline, type, registration, route, altitude, speed, vertical rate, squawk, heading and flight phase, plus a live log of real landings, departures, approaches and emergency squawks.
-- **3D models** — glTF airliners (A320, B737, B757, B767, B787, A350, A380, E-Jets) tinted in airline colours, and real ground-service vehicles.
+- **3D models** — glTF airliners (A320, B737, B757, B767, B787, A350, A380, E-Jets, CRJs) tinted in airline colours, a Cessna 172 for light aircraft, a Bell JetRanger for helicopters, and real ground-service vehicles.
 - **Real local time** — clocks, logs and the split-flap FIDS board use the airport's own time zone.
 
 ## Run it
@@ -146,7 +146,7 @@ under the [Open Database License](https://www.openstreetmap.org/copyright).
 3D models are not covered by the MIT License either:
 
 - A320, A350, A380, B737 and B787 airliners: [amvlab](https://github.com/amvlab/aircraft-models), [CC BY 4.0](./public/models/LICENSE-CC-BY-4.0.txt).
-- B757, B767 and E190 airliners: Bluebell CSL contributors via SDRangel and Clear Aviation Tracking, CC0 1.0.
+- B757, B767, E190 and CRJ900 airliners, the Cessna 172 and the Bell 206 helicopter: [Bluebell CSL](https://github.com/oktal3700/bluebell) contributors (via SDRangel and Clear Aviation Tracking for most), CC0 1.0.
 - Ground-service vehicles: [3DAssets.dev](https://3dassets.dev/packs/airport-terminal-and-ground-operations), CC0 1.0.
 
 Full credits are in [`public/models/CREDITS.txt`](./public/models/CREDITS.txt) and [`public/models/vehicles/CREDITS.txt`](./public/models/vehicles/CREDITS.txt).

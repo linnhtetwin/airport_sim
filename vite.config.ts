@@ -55,7 +55,8 @@ function airportApi(): Plugin {
       res.end(body);
     });
   };
-  const use = (server: unknown) => (server as MiddlewareServer).middlewares.use('/api/airport', handle);
+  // (a block body: a function returned from configureServer would be run as a post hook)
+  const use = (server: unknown) => { (server as MiddlewareServer).middlewares.use('/api/airport', handle); };
   return { name: 'airport-api', configureServer: use, configurePreviewServer: use };
 }
 

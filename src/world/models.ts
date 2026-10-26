@@ -67,6 +67,11 @@ function aircraftAsset(spec: TypeSpec): { name: string; yaw: number } | null {
   if (/^B75/.test(spec.code)) return { name: 'B752', yaw: Math.PI / 2 };
   if (/^B76/.test(spec.code)) return { name: 'B763', yaw: Math.PI / 2 };
   if (/^(E170|E75L|E190|E195|E295)$/.test(spec.code)) return { name: 'E190', yaw: Math.PI / 2 };
+  // These have their nose along +Z: a half turn. The Bell 206 (stand-in for the 407 it was
+  // developed into) already points along -Z.
+  if (/^CRJ/.test(spec.code)) return { name: 'CRJ9', yaw: Math.PI };
+  if (spec.size === 'light') return { name: 'C172', yaw: Math.PI };
+  if (spec.size === 'heli') return { name: 'B06', yaw: 0 };
   // Keep the built-in layout where the available assets have the wrong silhouette.
   if (/^(A34|B74)/.test(spec.code)) return null;
   if (spec.size === 'jumbo') return spec.code === 'A388' ? { name: 'A380', yaw: Math.PI / 2 } : null;
@@ -92,10 +97,16 @@ function loadAircraftAsset(name: string): Promise<THREE.Group | null> {
   return pending;
 }
 
-function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, airline: string | null): { model: THREE.Group; box: THREE.Box3; tips: THREE.Vector3[] } {
+/** Types drawn with a sibling's model, stretched to their own length and span. */
+const STRETCHED = /^(E170|E75L|E190|E195|E295|CRJ2|CRJ7|CRJ9|CRJX)$/;
+
+function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, airline: string | null): { model: THREE.Group; box: THREE.Box3; tips: THREE.Vector3[]; fin: THREE.Vector3 } {
+  // turned inside the group that gets scaled, so scale x is always the span and z the length
   const model = new THREE.Group();
-  model.rotation.y = yaw;
-  model.add(source.clone(true));
+  const oriented = new THREE.Group();
+  oriented.rotation.y = yaw;
+  oriented.add(source.clone(true));
+  model.add(oriented);
   const tint = airlineColors(airline).tail;
   model.traverse((object) => {
     if (!(object instanceof THREE.Mesh)) return;
@@ -145,9 +156,9 @@ function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, 
   const originalSize = originalBox.getSize(new THREE.Vector3());
   const spanScale = spec.span / originalSize.x;
   const lengthScale = spec.length / originalSize.z;
-  // Fit the E-Jet family's length and span independently. In particular, the
-  // E175 is shorter than the E190 while its published wingspan is the same.
-  if (/^(E170|E75L|E190|E195|E295)$/.test(spec.code)) model.scale.set(spanScale, Math.min(spanScale, lengthScale), lengthScale);
+  // Fit the E-Jet and CRJ families' length and span independently. In particular,
+  // the E175 is shorter than the E190 while its published wingspan is the same.
+  if (STRETCHED.test(spec.code)) model.scale.set(spanScale, Math.min(spanScale, lengthScale), lengthScale);
   else model.scale.setScalar(Math.min(spanScale, lengthScale));
   model.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(model);
@@ -159,11 +170,15 @@ function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, 
   const tipBand = Math.max(0.15, spec.span * 0.008);
   const tipSums = [new THREE.Vector3(), new THREE.Vector3()];
   const tipCounts = [0, 0];
+  // top of the tail fin: the highest point in the rear quarter (the nose is toward -Z)
+  const fin = new THREE.Vector3(0, 0, normalizedBox.max.z);
+  const rear = normalizedBox.max.z - spec.length * 0.25;
   model.traverse((object) => {
     if (!(object instanceof THREE.Mesh)) return;
     const positions = object.geometry.getAttribute('position');
     for (let i = 0; i < positions.count; i++) {
       const point = new THREE.Vector3().fromBufferAttribute(positions, i).applyMatrix4(object.matrixWorld);
+      if (point.z > rear && point.y > fin.y) fin.set(0, point.y, point.z);
       const side = point.x < 0 ? 0 : 1;
       const outerX = side === 0 ? normalizedBox.min.x : maxX;
       if (Math.abs(point.x - outerX) <= tipBand) {
@@ -175,7 +190,7 @@ function prepareAircraftAsset(source: THREE.Group, spec: TypeSpec, yaw: number, 
   const tips = tipSums.map((sum, i) => tipCounts[i]
     ? sum.multiplyScalar(1 / tipCounts[i])
     : new THREE.Vector3(i === 0 ? normalizedBox.min.x : normalizedBox.max.x, spec.length * 0.1, spec.length * 0.04));
-  return { model, box: normalizedBox, tips };
+  return { model, box: normalizedBox, tips, fin };
 }
 
 function buildTemplate(spec: TypeSpec, airline: string | null): AircraftTemplate {
@@ -357,7 +372,10 @@ export function buildAircraft(spec: TypeSpec, airline: string | null): AircraftM
   const sR = new THREE.Mesh(lightGeo, white); sR.position.set(t.wingTipX, yTip, strobeZ);
   const beacon = new THREE.Mesh(lightGeo, red);
   beacon.position.set(0, t.topY + 0.2, 0);
-  beacon.scale.setScalar(1.3);
+  // the light spheres are sized for airliners; small aircraft get smaller ones
+  const lightScale = Math.min(1, spec.length / 30);
+  for (const light of [navL, navR, sL, sR]) light.scale.setScalar(lightScale);
+  beacon.scale.setScalar(1.3 * lightScale);
   body.add(navL, navR, sL, sR, beacon);
   const asset = aircraftAsset(spec);
   if (asset) {
@@ -375,7 +393,9 @@ export function buildAircraft(spec: TypeSpec, airline: string | null): AircraftM
         nav.position.set(tip.x, tip.y + 0.18, tip.z);
         strobe.position.set(tip.x, tip.y + 0.28, tip.z + 0.3);
       }
-      beacon.position.set(0, Math.min(7, spec.length * 0.12) + 0.2, 0);
+      // light aircraft and helicopters carry the beacon on the fin; airliners on the fuselage
+      if (spec.size === 'light' || spec.size === 'heli') beacon.position.set(0, prepared.fin.y + 0.15, prepared.fin.z);
+      else beacon.position.set(0, Math.min(7, spec.length * 0.12) + 0.2, 0);
     });
   }
   return { root, body, gear, beacon, strobes: [sL, sR], navLights: [navL, navR], length: t.length };

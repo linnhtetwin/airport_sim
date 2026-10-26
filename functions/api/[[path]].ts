@@ -178,7 +178,7 @@ export const onRequest = async ({ request, params, waitUntil, env }: Context): P
     // the first origin may use most of the budget; later ones split what's left
     const left = deadline - Date.now();
     if (left < 5_000) break;
-    const slice = i === origins.length - 1 ? left : Math.max(left * 0.7, left - 30_000);
+    const slice = Math.round(i === origins.length - 1 ? left : Math.max(left * 0.7, left - 30_000)); // timeouts take whole ms
     try {
       res = await fetch(origin + path + url.search, {
         method: request.method,
