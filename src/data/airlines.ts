@@ -137,9 +137,29 @@ export function telephony(callsign: string): string {
   return cs;
 }
 
-/** Version for text-to-speech: digits read out one by one. */
-export function spokenText(text: string): string {
-  return text.replace(/\d/g, (d) => ` ${DIGITS[+d]} `).replace(/\s+/g, ' ').trim();
+// ICAO spelling alphabet (Alpha/Juliet rather than ICAO's Alfa/Juliett, so speech engines say them right)
+const PHONETIC = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Golf', 'Hotel', 'India', 'Juliet', 'Kilo', 'Lima', 'Mike',
+  'November', 'Oscar', 'Papa', 'Quebec', 'Romeo', 'Sierra', 'Tango', 'Uniform', 'Victor', 'Whiskey', 'X-ray', 'Yankee', 'Zulu'];
+const RUNWAY_SIDE: Record<string, string> = { L: 'left', R: 'right', C: 'center' };
+
+const spell = (code: string) => code.replace(/[A-Z]/g, (c) => ` ${PHONETIC[c.charCodeAt(0) - 65]} `);
+
+/**
+ * Version for text-to-speech: digits read out one by one, runway sides as left/right/center,
+ * and taxiways, stands, helipads and registrations in the spelling alphabet ("A3" -> "Alpha
+ * three"). Airline callsigns are read as their telephony ("BAW117" -> "Speedbird 117"), and
+ * the message's own callsign, when it is a registration, spelled out.
+ */
+export function spokenText(text: string, callsign?: string): string {
+  const cs = callsign?.trim().toUpperCase();
+  const s = text.replace(/\b[A-Z]{3}\d[A-Z0-9]*\b/g, telephony).replace(/\b[A-Z0-9]+\b/g, (w) => {
+    const rwy = /^(\d{2})([LRC])$/.exec(w);
+    if (rwy) return `${rwy[1]} ${RUNWAY_SIDE[rwy[2]]}`;
+    // letters with digits (taxiway B3, stand A12), lone letters (taxiway K), or a registration
+    if (/\d/.test(w) && /[A-Z]/.test(w) || /^[A-Z]{1,2}$/.test(w) || w === cs) return spell(w);
+    return w;
+  });
+  return s.replace(/\d/g, (d) => ` ${DIGITS[+d]} `).replace(/\s+/g, ' ').replace(/ ([,:])/g, '$1').trim();
 }
 
 export function airlineColors(code: string | null): { body: string; tail: string; accent: string } {

@@ -120,6 +120,107 @@ function loadAircraftAsset(name: string): Promise<THREE.Group | null> {
   return pending;
 }
 
+/**
+ * Engine fans, propellers and rotors per model, drawn as spinning blur discs while the engines
+ * run. Measured from the models: centre as fractions of the fitted box (x of the half span from
+ * the centre line, y of the height from the ground, z of the length from the nose) and radius as
+ * a fraction of the height. Fans and propellers face forward and come in mirrored pairs; the
+ * main rotor lies flat and the tail rotor faces sideways.
+ */
+type SpinKind = 'fan' | 'prop' | 'rotor' | 'tail';
+interface Spinner { kind: SpinKind; fx: number; fy: number; fz: number; fr: number }
+const fan = (fx: number, fy: number, fz: number, fr: number): Spinner => ({ kind: 'fan', fx, fy, fz, fr });
+const SPINNERS: Record<string, Spinner[]> = {
+  A320: [fan(0.278, 0.111, 0.305, 0.101)],
+  A350: [fan(0.313, 0.12, 0.331, 0.119)],
+  A380: [fan(0.407, 0.086, 0.323, 0.083), fan(0.656, 0.116, 0.435, 0.083)],
+  B737: [fan(0.282, 0.088, 0.348, 0.096)],
+  B744: [fan(0.362, 0.081, 0.325, 0.074), fan(0.638, 0.124, 0.454, 0.074)],
+  B752: [fan(0.345, 0.108, 0.36, 0.096)],
+  B763: [fan(0.347, 0.092, 0.335, 0.088)],
+  B787: [fan(0.329, 0.127, 0.319, 0.126)],
+  E190: [fan(0.312, 0.102, 0.332, 0.094)],
+  CRJ9: [fan(0.188, 0.425, 0.728, 0.11)],
+  DH8D: [{ kind: 'prop', fx: 0.314, fy: 0.335, fz: 0.334, fr: 0.272 }],
+  C172: [{ kind: 'prop', fx: 0, fy: 0.475, fz: 0.027, fr: 0.291 }],
+  B06: [{ kind: 'rotor', fx: 0, fy: 0.957, fz: 0.423, fr: 1.485 }, { kind: 'tail', fx: -0.278, fy: 0.657, fz: 0.935, fr: 0.255 }],
+};
+
+/** Look of each disc: blade count, blur and blade colour and strength, hub, spin rate (rad/s). */
+const SPIN_LOOK: Record<SpinKind, { blades: number; base: string; baseA: number; blade: string; bladeA: number; hub: number; rate: number }> = {
+  fan: { blades: 8, base: '#1c2026', baseA: 0.95, blade: '#8d96a0', bladeA: 0.55, hub: 0.24, rate: 14 },
+  prop: { blades: 4, base: '#2c3036', baseA: 0.16, blade: '#2c3036', bladeA: 0.4, hub: 0, rate: 18 },
+  rotor: { blades: 2, base: '#2b2f35', baseA: 0.1, blade: '#2b2f35', bladeA: 0.32, hub: 0, rate: 6 },
+  tail: { blades: 2, base: '#2b2f35', baseA: 0.14, blade: '#2b2f35', bladeA: 0.4, hub: 0, rate: 20 },
+};
+
+const spinMats = new Map<SpinKind, THREE.Material>();
+function spinMaterial(kind: SpinKind): THREE.Material {
+  let m = spinMats.get(kind);
+  if (m) return m;
+  const look = SPIN_LOOK[kind];
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const x = c.getContext('2d')!;
+  x.translate(128, 128);
+  const R = 126;
+  x.fillStyle = look.base;
+  x.globalAlpha = look.baseA;
+  x.beginPath(); x.arc(0, 0, R, 0, Math.PI * 2); x.fill();
+  // each blade a bright leading edge fading out behind it, like a blurred photo of a spinning blade
+  x.fillStyle = look.blade;
+  for (let i = 0; i < look.blades; i++) for (let k = 0; k < 8; k++) {
+    const a = (i / look.blades) * Math.PI * 2 - k * 0.07;
+    x.globalAlpha = look.bladeA * (1 - k / 8);
+    x.beginPath(); x.moveTo(0, 0); x.arc(0, 0, R, a - 0.07, a); x.closePath(); x.fill();
+  }
+  if (look.hub) {
+    // spinner cone with its painted swirl, which makes the turning easy to see
+    x.globalAlpha = 1;
+    x.fillStyle = '#c9ced4';
+    x.beginPath(); x.arc(0, 0, R * look.hub, 0, Math.PI * 2); x.fill();
+    x.strokeStyle = '#2a2e35';
+    x.lineWidth = R * 0.04;
+    x.beginPath(); x.arc(R * look.hub * 0.35, 0, R * look.hub * 0.55, Math.PI * 0.5, Math.PI * 1.4); x.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  m = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, side: THREE.DoubleSide });
+  spinMats.set(kind, m);
+  return m;
+}
+
+const discGeo = new THREE.CircleGeometry(1, 40);
+
+/** Spinning discs for one prepared model, placed in airframe space; they start hidden. */
+function addSpinners(body: THREE.Group, asset: string, box: THREE.Box3): THREE.Mesh[] {
+  const size = box.getSize(new THREE.Vector3());
+  const midX = (box.min.x + box.max.x) / 2;
+  const out: THREE.Mesh[] = [];
+  for (const s of SPINNERS[asset] ?? []) {
+    const r = s.fr * size.y;
+    const y = box.min.y + s.fy * size.y;
+    // fan discs sit just ahead of the intake lip so the nacelle never hides them
+    const z = box.min.z + s.fz * size.z - (s.kind === 'fan' ? 0.05 : 0);
+    const sides = s.fx && (s.kind === 'fan' || s.kind === 'prop') ? [1, -1] : [1];
+    for (const side of sides) {
+      const pivot = new THREE.Group();
+      pivot.position.set(midX + side * s.fx * size.x / 2, y, z);
+      // the disc spins about its own z: forward for fans and props, up for the rotor, sideways for the tail rotor
+      if (s.kind === 'rotor') pivot.rotation.x = -Math.PI / 2;
+      else if (s.kind === 'tail') pivot.rotation.y = Math.PI / 2;
+      const disc = new THREE.Mesh(discGeo, spinMaterial(s.kind));
+      disc.scale.setScalar(r);
+      disc.visible = false;
+      disc.userData.spin = SPIN_LOOK[s.kind].rate;
+      pivot.add(disc);
+      body.add(pivot);
+      out.push(disc);
+    }
+  }
+  return out;
+}
+
 /** Types drawn with a sibling's model, stretched to their own length and span. */
 const STRETCHED = /^(E170|E75L|E190|E195|E295|CL60|CRJ2|CRJ7|CRJ9|CRJX|DH8A|DH8B|DH8C|DH8D|AT45|AT76|B744|B748)$/;
 
@@ -479,6 +580,8 @@ export interface AircraftModel {
   beacon: THREE.Mesh;
   strobes: THREE.Mesh[];
   navLights: THREE.Mesh[];
+  /** Fan, propeller and rotor blur discs, shown and turned while the engines run. */
+  spinners: THREE.Mesh[];
   length: number;
 }
 
@@ -515,6 +618,7 @@ export function buildAircraft(spec: TypeSpec, airline: string | null): AircraftM
   for (const light of [navL, navR, sL, sR]) light.scale.setScalar(lightScale);
   beacon.scale.setScalar(1.3 * lightScale);
   body.add(navL, navR, sL, sR, beacon);
+  const spinners: THREE.Mesh[] = [];
   const asset = aircraftAsset(spec);
   if (asset) {
     loadAircraftAsset(asset.name).then((source) => {
@@ -527,6 +631,7 @@ export function buildAircraft(spec: TypeSpec, airline: string | null): AircraftM
       fallbackAirframe.visible = false;
       fallbackGear.visible = false;
       gear.length = 0;
+      spinners.push(...addSpinners(body, asset.name, prepared.box));
       for (let i = 0; i < prepared.tips.length; i++) {
         const tip = prepared.tips[i];
         const nav = i === 0 ? navL : navR;
@@ -539,7 +644,7 @@ export function buildAircraft(spec: TypeSpec, airline: string | null): AircraftM
       else beacon.position.set(0, Math.min(7, spec.length * 0.12) + 0.2, 0);
     });
   }
-  return { root, body, gear, beacon, strobes: [sL, sR], navLights: [navL, navR], length: t.length };
+  return { root, body, gear, beacon, strobes: [sL, sR], navLights: [navL, navR], spinners, length: t.length };
 }
 
 // ---------------- ground vehicles ----------------

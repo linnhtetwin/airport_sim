@@ -46,6 +46,11 @@ export class TrafficView {
       m.beacon.visible = s.lights && flash;
       for (const st of m.strobes) st.visible = s.y > 2 && (t * 1.3) % 1.3 < 0.08;
       for (const n of m.navLights) n.visible = s.lights || night;
+      // the beacon is on while the engines run: fans, propellers and rotors turn with it
+      for (const d of m.spinners) {
+        d.visible = s.lights;
+        if (s.lights) d.rotation.z = (t * d.userData.spin) % (Math.PI * 2);
+      }
       const cls = `ac-label ${s.cls}${s.id === selected ? ' selected' : ''}`;
       if (e.cls !== cls) { e.el.className = cls; e.cls = cls; }
       if (e.html !== s.label) { e.el.innerHTML = s.label; e.html = s.label; }

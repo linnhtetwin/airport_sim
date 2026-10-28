@@ -60,7 +60,7 @@ export class Radio {
   private speakNext() {
     const m = this.queue.shift();
     if (!m) return;
-    const u = new SpeechSynthesisUtterance(spokenText(m.text.replace(/RWY/g, 'runway').replace(/\bFL(\d+)/g, 'flight level $1')));
+    const u = new SpeechSynthesisUtterance(spokenText(m.text.replace(/RWY/g, 'runway').replace(/\bFL(\d+)/g, 'flight level $1'), m.callsign));
     const atc = m.who === 'TWR' || m.who === 'GND' || m.who === 'RAMP';
     if (this.voices.length) u.voice = this.voices[atc ? 0 : Math.min(1, this.voices.length - 1)];
     u.rate = 1.12;
